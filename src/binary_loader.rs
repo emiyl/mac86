@@ -17,6 +17,7 @@ pub struct BinaryInfo {
     #[allow(dead_code)]
     pub sections: Vec<Section>,
     pub segments: Vec<Segment>,
+    pub raw: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -68,6 +69,15 @@ pub fn load_binary(path: &Path) -> EmulationResult<BinaryInfo> {
         }
     };
 
+    // Only executable Mach-O files are currently supported.
+    // MH_EXECUTE == 0x2, while MH_OBJECT (0x1) is a relocatable .o file.
+    if macho.header.filetype != 0x2 {
+        return Err(EmulationError::BinaryLoadError(format!(
+            "Unsupported Mach-O file type {} (expected MH_EXECUTE=2). Build a runnable i386 executable, not a .o object.",
+            macho.header.filetype
+        )));
+    }
+
     // Extract segments from the segments field
     let mut segments = Vec::new();
     for segment in &macho.segments {
@@ -105,8 +115,42 @@ pub fn load_binary(path: &Path) -> EmulationResult<BinaryInfo> {
         format!("{:?}", cmd).contains("DyLinker") || format!("{:?}", cmd).contains("Dylib")
     });
 
-    // Get entry point (simplified - default to 0x1000)
-    let entry_point = 0x1000u32;
+    // Current emulator scope: flat, self-contained binaries without dyld/libSystem bootstrap.
+    if is_dynamic {
+        return Err(EmulationError::BinaryLoadError(
+            "Dynamically linked Mach-O binaries are not supported yet (requires dyld/libSystem emulation). Build a minimal self-contained test binary instead.".to_string(),
+        ));
+    }
+
+    // Try to extract entry point from LC_UNIXTHREAD (eip) if present in load commands.
+    let mut entry_point_from_thread: Option<u32> = None;
+    for cmd in &macho.load_commands {
+        let dump = format!("{:?}", cmd);
+        if let Some(start) = dump.find("thread_state: [") {
+            let rest = &dump[start + "thread_state: [".len()..];
+            if let Some(end) = rest.find(']') {
+                let nums = &rest[..end];
+                let parts: Vec<&str> = nums.split(',').map(|s| s.trim()).collect();
+                if parts.len() > 10 {
+                    if let Ok(val) = parts[10].parse::<u32>() {
+                        entry_point_from_thread = Some(val);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    // Determine entry point: prefer LC_UNIXTHREAD eip, then a __text section address, else first segment vaddr, fallback 0x1000
+    let entry_point = entry_point_from_thread
+        .or_else(|| {
+            sections
+                .iter()
+                .find(|s| s.name.to_lowercase().contains("text"))
+                .map(|s| s.addr)
+        })
+        .or_else(|| segments.get(0).map(|seg| seg.vaddr))
+        .unwrap_or(0x1000u32);
 
     Ok(BinaryInfo {
         name: path
@@ -121,6 +165,7 @@ pub fn load_binary(path: &Path) -> EmulationResult<BinaryInfo> {
         heap_size: 32 * 1024 * 1024, // 32MB default
         sections,
         segments,
+        raw: bytes,
     })
 }
 

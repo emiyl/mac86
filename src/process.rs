@@ -63,20 +63,51 @@ impl Process {
             );
 
             // Create a zero-filled buffer for the segment
-            let data = vec![0u8; segment.vsize as usize];
+            let mut data = vec![0u8; segment.vsize as usize];
 
-            // If there's file data, copy it in
+            // If there's file data, copy it in from the original binary raw bytes
             if segment.filesize > 0 {
-                // Get data from sections for this segment
                 let copy_size = std::cmp::min(segment.filesize, segment.vsize) as usize;
                 if copy_size > 0 {
-                    // For simplicity, fill with zeros (in reality, we'd copy from file)
-                    // This is where section data would be copied from the binary
+                    let file_off = segment.fileoff as usize;
+                    let file_end = file_off + copy_size;
+                    if file_end <= self.binary.raw.len() {
+                        data[..copy_size].copy_from_slice(&self.binary.raw[file_off..file_end]);
+                    } else {
+                        // Fallback: if goblin reported odd file ranges, copy the whole file at segment base.
+                        let copy_len = std::cmp::min(self.binary.raw.len(), data.len());
+                        data[..copy_len].copy_from_slice(&self.binary.raw[..copy_len]);
+                    }
                 }
             }
 
             // Write segment into emulated memory
             self.cpu.write_memory(segment.vaddr, &data)?;
+        }
+
+        // Write sections (actual file-backed data) into memory at their addresses
+        for section in &self.binary.sections {
+            if section.size > 0 && !section.data.is_empty() {
+                info!(
+                    "Writing section {} at 0x{:x} (size=0x{:x})",
+                    section.name, section.addr, section.size
+                );
+                self.cpu.write_memory(section.addr, &section.data)?;
+            }
+        }
+
+        // Fallback for minimalist binaries with inconsistent segment metadata:
+        // if entry bytes are all zeros but raw file has data at that offset, patch it in.
+        let entry = self.binary.entry_point as usize;
+        if entry + 16 <= self.binary.raw.len() {
+            let current = self.cpu.read_memory(self.binary.entry_point, 16)?;
+            if current.iter().all(|b| *b == 0) {
+                let patch_len = std::cmp::min(256usize, self.binary.raw.len() - entry);
+                self.cpu.write_memory(
+                    self.binary.entry_point,
+                    &self.binary.raw[entry..entry + patch_len],
+                )?;
+            }
         }
 
         info!("Binary loaded into memory");
@@ -155,17 +186,11 @@ impl Process {
 
         // Execute the binary
         info!("Starting emulation");
-        match self.cpu.execute(0) {
-            Ok(()) => {
-                info!("Process completed successfully");
-                let final_state = self.cpu.dump_registers()?;
-                info!("Final CPU state: {}", final_state);
-                Ok(())
-            }
-            Err(e) => {
-                info!("Process terminated: {}", e);
-                Ok(()) // Some processes exit via syscall, which is normal
-            }
-        }
+        self.cpu.execute(0)?;
+
+        info!("Process completed successfully");
+        let final_state = self.cpu.dump_registers()?;
+        info!("Final CPU state: {}", final_state);
+        Ok(())
     }
 }
