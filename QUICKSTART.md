@@ -15,6 +15,37 @@ The binary will be available at: `target/release/mac86`
 ./target/release/mac86 /path/to/i386/macos/binary
 ```
 
+## Phase 1: Freestanding C (Works with Current Emulator)
+
+The current emulator supports self-contained i386 binaries that issue syscalls directly.
+
+Build a freestanding sample C program:
+
+```bash
+# If your SDK is somewhere else, set this first:
+# export MACOSX_I386_SDK=~/Downloads/MacOSX10.13.sdk
+
+./samples/build_freestanding.sh
+```
+
+Run it:
+
+```bash
+cargo run -- samples/phase1_hello_static
+```
+
+Use your own C source file:
+
+```bash
+./samples/build_freestanding.sh samples/myprog samples/myprog.c
+cargo run -- samples/myprog
+```
+
+Notes:
+- Entry code is provided by `samples/crt0.s` (`_start` calls `_main`, then does `sys_exit`).
+- Syscall helpers are in `samples/syscall.h`.
+- This path avoids dynamic linking and `libSystem`/`dyld` requirements.
+
 ## Example: Test Binary
 
 To create a minimal i386 test binary for testing:

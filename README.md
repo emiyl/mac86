@@ -180,6 +180,20 @@ Currently uses Unicorn Engine for x86/i386 CPU emulation:
 5. **Single Threading**: Multi-threaded apps may not work correctly
 6. **No Frameworks**: macOS framework support not implemented
 
+## Freestanding C (Phase 1)
+
+You can compile and run self-contained i386 C programs now (without `dyld`/`libSystem`):
+
+```bash
+# Build sample freestanding binary
+./samples/build_freestanding.sh
+
+# Run in emulator
+cargo run -- samples/phase1_hello_static
+```
+
+Use `samples/crt0.s` and `samples/syscall.h` as the minimal runtime for your own C sources.
+
 ## Future Enhancements
 
 - [ ] Full dynamic linking support
