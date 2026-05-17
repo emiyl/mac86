@@ -5,7 +5,7 @@ edition = "2021"
 
 [dependencies]
 # Emulation and execution
-unicorn = "0.3"  # CPU emulation engine
+unicorn-engine = "2.1"
 goblin = "0.8"   # Binary parsing (for Mach-O support)
 
 # CLI argument parsing

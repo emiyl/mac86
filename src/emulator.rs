@@ -5,7 +5,7 @@ use std::path::PathBuf;
 pub struct EmulationContext {
     /// Path to the emulation environment
     env_path: PathBuf,
-    
+
     /// Emulation state
     state: EmulationState,
 }
@@ -28,8 +28,7 @@ impl EmulationContext {
         });
 
         // Create environment directory if it doesn't exist
-        std::fs::create_dir_all(&env_path)
-            .map_err(|e| EmulationError::IoError(e))?;
+        std::fs::create_dir_all(&env_path).map_err(|e| EmulationError::IoError(e))?;
 
         Ok(EmulationContext {
             env_path,

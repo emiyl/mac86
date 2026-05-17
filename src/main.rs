@@ -1,10 +1,11 @@
 mod binary_loader;
+mod cpu;
 mod emulator;
-mod syscall;
-mod memory;
-mod filesystem;
-mod process;
 mod errors;
+mod filesystem;
+mod memory;
+mod process;
+mod syscall;
 
 use anyhow::Result;
 use clap::Parser;
@@ -55,10 +56,13 @@ fn main() -> Result<()> {
 
     // Load the binary
     let binary_info = binary_loader::load_binary(&args.binary)?;
-    info!("Binary loaded: {} (entry: 0x{:x})", binary_info.name, binary_info.entry_point);
+    info!(
+        "Binary loaded: {} (entry: 0x{:x})",
+        binary_info.name, binary_info.entry_point
+    );
 
     // Create and run the process
-    let process = process::Process::new(binary_info, &mut emulation_context)?;
+    let mut process = process::Process::new(binary_info, &mut emulation_context)?;
     process.execute(&args.args)?;
 
     info!("Execution completed");

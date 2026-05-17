@@ -59,7 +59,7 @@ pub fn load_binary(path: &Path) -> EmulationResult<BinaryInfo> {
 
     // Check architecture
     let arch = match macho.header.cputype {
-        7 => Architecture::I386,   // CPU_TYPE_I386
+        7 => Architecture::I386, // CPU_TYPE_I386
         _ => {
             return Err(EmulationError::InvalidArchitecture(format!(
                 "Unsupported CPU type: {}",
@@ -109,11 +109,15 @@ pub fn load_binary(path: &Path) -> EmulationResult<BinaryInfo> {
     let entry_point = 0x1000u32;
 
     Ok(BinaryInfo {
-        name: path.file_name().unwrap_or_default().to_string_lossy().to_string(),
+        name: path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string(),
         entry_point,
         arch,
         is_dynamic,
-        stack_size: 8 * 1024 * 1024,  // 8MB default
+        stack_size: 8 * 1024 * 1024, // 8MB default
         heap_size: 32 * 1024 * 1024, // 32MB default
         sections,
         segments,

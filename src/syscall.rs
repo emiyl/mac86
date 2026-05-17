@@ -1,11 +1,4 @@
 use crate::errors::{EmulationError, EmulationResult};
-use std::collections::HashMap;
-
-/// i386 macOS syscall handler
-pub struct SyscallHandler {
-    /// Mapping of syscall numbers to handlers
-    handlers: HashMap<u32, Box<dyn Fn(SyscallArgs) -> EmulationResult<u32>>>,
-}
 
 /// Arguments passed to a syscall
 #[derive(Debug, Clone)]
@@ -19,92 +12,77 @@ pub struct SyscallArgs {
     pub arg5: u32,
 }
 
+/// i386 macOS syscall handler
+pub struct SyscallHandler;
+
 impl SyscallHandler {
     pub fn new() -> Self {
-        SyscallHandler {
-            handlers: HashMap::new(),
+        SyscallHandler
+    }
+
+    /// Handle a syscall based on number
+    pub fn handle_syscall(&self, args: SyscallArgs) -> EmulationResult<u32> {
+        match args.number {
+            1 => {
+                // exit(status)
+                log::info!("exit({})", args.arg0);
+                std::process::exit(args.arg0 as i32);
+            }
+            3 => {
+                // read(fd, buf, count)
+                log::debug!("read({}, 0x{:x}, {})", args.arg0, args.arg1, args.arg2);
+                Ok(0) // Simplified: no data read
+            }
+            4 => {
+                // write(fd, buf, count)
+                log::debug!("write({}, 0x{:x}, {})", args.arg0, args.arg1, args.arg2);
+                Ok(args.arg2 as u32) // Simplified: assume write succeeds
+            }
+            5 => {
+                // open(path, flags)
+                log::debug!("open(0x{:x}, {})", args.arg0, args.arg1);
+                Ok(3) // Return file descriptor
+            }
+            6 => {
+                // close(fd)
+                log::debug!("close({})", args.arg0);
+                Ok(0)
+            }
+            18 => {
+                // stat(path, sb)
+                log::debug!("stat(0x{:x}, 0x{:x})", args.arg0, args.arg1);
+                Ok(0)
+            }
+            20 => {
+                // getpid()
+                let pid = std::process::id();
+                log::debug!("getpid() = {}", pid);
+                Ok(pid)
+            }
+            24 => {
+                // getuid()
+                log::debug!("getuid()");
+                Ok(0) // Simplified: return root
+            }
+            _ => {
+                log::warn!("Unimplemented syscall: {}", args.number);
+                Err(EmulationError::SyscallError(format!(
+                    "Unimplemented syscall: {}",
+                    args.number
+                )))
+            }
         }
     }
 
-    /// Register a syscall handler
-    pub fn register<F>(&mut self, syscall_num: u32, handler: F)
-    where
-        F: Fn(SyscallArgs) -> EmulationResult<u32> + 'static,
-    {
-        self.handlers.insert(syscall_num, Box::new(handler));
-    }
-
-    /// Handle a syscall
-    pub fn handle_syscall(&self, args: SyscallArgs) -> EmulationResult<u32> {
-        let handler = self
-            .handlers
-            .get(&args.number)
-            .ok_or_else(|| EmulationError::SyscallError(format!(
-                "Unimplemented syscall: {}",
-                args.number
-            )))?;
-
-        handler(args)
-    }
-
-    /// Initialize default i386 macOS syscalls
+    /// Setup default handlers (kept for backward compatibility)
     pub fn setup_defaults(&mut self) {
-        // Exit syscall (1)
-        self.register(1, |args| {
-            log::info!("exit({})", args.arg0);
-            std::process::exit(args.arg0 as i32);
-        });
-
-        // Write syscall (4)
-        self.register(4, |args| {
-            log::debug!("write({}, 0x{:x}, {})", args.arg0, args.arg1, args.arg2);
-            Ok(args.arg2 as u32) // Simplified: assume write succeeds
-        });
-
-        // Read syscall (3)
-        self.register(3, |args| {
-            log::debug!("read({}, 0x{:x}, {})", args.arg0, args.arg1, args.arg2);
-            Ok(0) // Simplified: no data read
-        });
-
-        // Open syscall (5)
-        self.register(5, |args| {
-            log::debug!("open(0x{:x}, {})", args.arg0, args.arg1);
-            Ok(3) // Return file descriptor
-        });
-
-        // Close syscall (6)
-        self.register(6, |args| {
-            log::debug!("close({})", args.arg0);
-            Ok(0)
-        });
-
-        // Stat syscall (18)
-        self.register(18, |args| {
-            log::debug!("stat(0x{:x}, 0x{:x})", args.arg0, args.arg1);
-            Ok(0)
-        });
-
-        // Getpid syscall (20)
-        self.register(20, |_args| {
-            let pid = std::process::id();
-            log::debug!("getpid() = {}", pid);
-            Ok(pid)
-        });
-
-        // Getuid syscall (24)
-        self.register(24, |_args| {
-            log::debug!("getuid()");
-            Ok(0) // Simplified: return root
-        });
+        // No-op: handlers are now built into handle_syscall
     }
 }
 
 impl Default for SyscallHandler {
     fn default() -> Self {
-        let mut handler = Self::new();
-        handler.setup_defaults();
-        handler
+        Self::new()
     }
 }
 
