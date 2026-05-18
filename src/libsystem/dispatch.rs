@@ -10,7 +10,8 @@ use super::mem::{read_bytes, read_cstr, read_cstr_max, read_u32, write_u32};
 use super::printf::{fmt_printf, fmt_printf_str, format_str};
 use super::symbols::LibSym;
 use super::trampoline::{
-    ERRNO_STORAGE_ADDR, OPTARG_STORAGE_ADDR, OPTIND_STORAGE_ADDR, THREAD_SENTINEL_ADDR,
+    ERRNO_STORAGE_ADDR, FDOPEN_FILE_BASE, OPTARG_STORAGE_ADDR, OPTIND_STORAGE_ADDR,
+    STDERR_FILE_PTR, STDIN_FILE_PTR, STDOUT_FILE_PTR, THREAD_SENTINEL_ADDR,
 };
 
 pub enum DispatchOutcome {
@@ -57,6 +58,16 @@ pub fn handle_libcall(
         }
         DispatchOutcome::Exit => LibCallOutcome::Exit,
         DispatchOutcome::StateSet => LibCallOutcome::Continue,
+    }
+}
+
+fn file_ptr_to_fd(file_ptr: u32) -> u32 {
+    match file_ptr {
+        x if x == STDIN_FILE_PTR => 0,
+        x if x == STDOUT_FILE_PTR => 1,
+        x if x == STDERR_FILE_PTR => 2,
+        x if x >= FDOPEN_FILE_BASE && x < FDOPEN_FILE_BASE + 0x1000 => (x - FDOPEN_FILE_BASE) / 4,
+        _ => u32::MAX,
     }
 }
 
@@ -392,6 +403,26 @@ fn dispatch(
             let _ = fs.write_bytes(2, format!("{}: error\n", msg).as_bytes());
             DispatchOutcome::Ret(0)
         }
+        LibSym::Fileno => DispatchOutcome::Ret(file_ptr_to_fd(a0) as u64),
+        LibSym::Fdopen => {
+            // fdopen(fd, mode) → synthesize a stable fake FILE* for this fd
+            DispatchOutcome::Ret((FDOPEN_FILE_BASE + a0 * 4) as u64)
+        }
+        LibSym::Fwrite => {
+            let fd = file_ptr_to_fd(a3);
+            let count = (a1 as usize).saturating_mul(a2 as usize);
+            let data = read_bytes(emu, a0, count);
+            let written = fs.write_bytes(fd, &data).unwrap_or(0);
+            DispatchOutcome::Ret(if a1 == 0 { 0 } else { written / a1 as usize } as u64)
+        }
+        LibSym::Fclose => {
+            let fd = file_ptr_to_fd(a0);
+            if fd > 2 {
+                let _ = fs.close(fd);
+            }
+            DispatchOutcome::Ret(0)
+        }
+        LibSym::Feof | LibSym::Ferror | LibSym::Clearerr => DispatchOutcome::Ret(0),
 
         // ── Memory ───────────────────────────────────────────────────────────
         LibSym::Malloc => {

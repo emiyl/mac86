@@ -105,6 +105,14 @@ pub enum LibSym {
     Perror,
     Putchar,
     Getchar,
+    // stdio FILE* operations
+    Fileno,
+    Fdopen,
+    Fwrite,
+    Fclose,
+    Feof,
+    Ferror,
+    Clearerr,
     // dynamic linking
     Dlopen,
     Dlsym,
@@ -290,6 +298,13 @@ pub fn known_symbol(name: &str) -> Option<LibSym> {
         "perror" => Some(LibSym::Perror),
         "putchar" | "putchar_unlocked" => Some(LibSym::Putchar),
         "getchar" | "getchar_unlocked" => Some(LibSym::Getchar),
+        "fileno" | "fileno_unlocked" => Some(LibSym::Fileno),
+        "fdopen" => Some(LibSym::Fdopen),
+        "fwrite" => Some(LibSym::Fwrite),
+        "fclose" => Some(LibSym::Fclose),
+        "feof" | "feof_unlocked" => Some(LibSym::Feof),
+        "ferror" | "ferror_unlocked" => Some(LibSym::Ferror),
+        "clearerr" | "clearerr_unlocked" => Some(LibSym::Clearerr),
         "dlopen" => Some(LibSym::Dlopen),
         "dlsym" => Some(LibSym::Dlsym),
         "dlclose" => Some(LibSym::Dlclose),
@@ -394,6 +409,11 @@ pub fn known_data_symbol(name: &str) -> Option<u32> {
     match base_name(name) {
         "optind" => Some(0x5000_F000),
         "optarg" => Some(0x5000_F004),
+        // stdio FILE* globals — slots point to storage holding the fake FILE* value.
+        // base_name strips ALL leading underscores, so ___stdoutp → "stdoutp".
+        "stdinp" => Some(0x5001_F000),
+        "stdoutp" => Some(0x5001_F004),
+        "stderrp" => Some(0x5001_F008),
         _ => None,
     }
 }
