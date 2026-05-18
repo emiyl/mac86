@@ -17,13 +17,17 @@ use unicorn_engine::{RegisterX86, Unicorn};
 pub const TRAMPOLINE_BASE: u32 = 0x5000_0000;
 pub const THREAD_SENTINEL_ADDR: u32 = TRAMPOLINE_BASE + 4;
 pub const SIGNAL_RETURN_ADDR: u32 = TRAMPOLINE_BASE + 8;
+pub const OPTIND_STORAGE_ADDR: u32 = 0x5000_F000;
+pub const OPTARG_STORAGE_ADDR: u32 = 0x5000_F004;
 
 // ── symbol catalogue ─────────────────────────────────────────────────────────
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum LibSym {
     // I/O
-    Write, Writev, Read, Open, Close,
+    Write, Writev, Read, Open, Close, Mkdir,
+    // argv / option parsing
+    Getopt,
     // Process
     Exit, Abort,
     // Memory
@@ -88,6 +92,8 @@ pub fn known_symbol(name: &str) -> Option<LibSym> {
         "read" |"read_nocancel" |"pread"       => Some(LibSym::Read),
         "open" |"open_nocancel"                => Some(LibSym::Open),
         "close"|"close_nocancel"               => Some(LibSym::Close),
+        "mkdir"                                => Some(LibSym::Mkdir),
+        "getopt"                               => Some(LibSym::Getopt),
         "exit" |"_exit"|"quick_exit"           => Some(LibSym::Exit),
         "abort"                                => Some(LibSym::Abort),
         "malloc"|"malloc_zone_malloc"          => Some(LibSym::Malloc),
@@ -239,6 +245,14 @@ pub fn known_symbol(name: &str) -> Option<LibSym> {
     }
 }
 
+fn known_data_symbol(name: &str) -> Option<u32> {
+    match base_name(name) {
+        "optind" => Some(OPTIND_STORAGE_ADDR),
+        "optarg" => Some(OPTARG_STORAGE_ADDR),
+        _ => None,
+    }
+}
+
 // ── trampoline table ──────────────────────────────────────────────────────────
 
 pub struct Trampoline {
@@ -264,6 +278,11 @@ impl Trampoline {
 
         let mut slot = 3u32;
         for imp in &bindings.imports {
+            if let Some(data_addr) = known_data_symbol(&imp.name) {
+                name_to_addr.insert(imp.name.clone(), data_addr);
+                continue;
+            }
+
             // Unknown symbols fall back to Stub0 (return 0, log at debug level).
             // This ensures every pointer slot gets filled with a valid trampoline
             // address; no stub-helper code is ever reached.
@@ -380,6 +399,43 @@ fn dispatch(
             }
         }
         LibSym::Close => { let _ = fs.close(a0); DispatchOutcome::Ret(0) }
+        LibSym::Mkdir => {
+            let path = read_cstr(emu, a0);
+            match fs.mkdir(std::path::Path::new(&path)) {
+                Ok(_) => DispatchOutcome::Ret(0),
+                Err(_) => DispatchOutcome::Ret(u32::MAX as u64),
+            }
+        }
+        LibSym::Getopt => {
+            // Minimal getopt for common BSD/GNU loops used by coreutils.
+            // Supports "-x" options and updates optind/optarg globals.
+            let argc = a0 as i32;
+            let argv = a1;
+
+            let mut optind = read_u32(emu, OPTIND_STORAGE_ADDR) as i32;
+            if optind <= 0 { optind = 1; }
+            write_u32(emu, OPTARG_STORAGE_ADDR, 0);
+
+            if optind >= argc {
+                DispatchOutcome::Ret(u32::MAX as u64)
+            } else {
+                let arg_ptr = read_u32(emu, argv.wrapping_add((optind as u32) * 4));
+                let arg = read_cstr(emu, arg_ptr);
+
+                if arg == "--" {
+                    optind += 1;
+                    write_u32(emu, OPTIND_STORAGE_ADDR, optind as u32);
+                    DispatchOutcome::Ret(u32::MAX as u64)
+                } else if !arg.starts_with('-') || arg == "-" {
+                    DispatchOutcome::Ret(u32::MAX as u64)
+                } else {
+                    let opt = arg.as_bytes().get(1).copied().unwrap_or(b'?');
+                    optind += 1;
+                    write_u32(emu, OPTIND_STORAGE_ADDR, optind as u32);
+                    DispatchOutcome::Ret(opt as u64)
+                }
+            }
+        }
         LibSym::Exit | LibSym::Abort => DispatchOutcome::Exit,
         LibSym::Putchar => {
             let _ = fs.write_bytes(1, &[a0 as u8]);
@@ -981,6 +1037,10 @@ fn read_u32(emu: &Unicorn<'_, ()>, addr: u32) -> u32 {
     let mut buf = [0u8; 4];
     let _ = emu.mem_read(addr as u64, &mut buf);
     u32::from_le_bytes(buf)
+}
+
+fn write_u32(emu: &mut Unicorn<'_, ()>, addr: u32, value: u32) {
+    let _ = emu.mem_write(addr as u64, &value.to_le_bytes());
 }
 
 fn read_bytes(emu: &Unicorn<'_, ()>, addr: u32, len: usize) -> Vec<u8> {

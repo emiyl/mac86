@@ -237,6 +237,12 @@ impl Process {
             self.cpu
                 .setup_trampoline_hook(Rc::clone(&self.filesystem), trampoline)?;
 
+            // Initialize common libSystem globals used by BSD getopt.
+            self.cpu
+                .write_memory(libsystem::OPTIND_STORAGE_ADDR, &1u32.to_le_bytes())?;
+            self.cpu
+                .write_memory(libsystem::OPTARG_STORAGE_ADDR, &0u32.to_le_bytes())?;
+
             self.filesystem.borrow_mut().trampoline_map = sym_map;
 
             for (slot, taddr) in patches {

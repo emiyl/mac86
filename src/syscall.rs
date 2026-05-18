@@ -88,6 +88,7 @@ impl SyscallHandler {
                 args.arg5
             );
         }
+        eprintln!("[debug-all-syscalls] number={}", args.number);
 
         match args.number {
             // ── Phase 2 core ─────────────────────────────────────────────────
@@ -360,6 +361,24 @@ impl SyscallHandler {
                 // readlink(path, buf, bufsiz) — ENOENT for unknown paths
                 log::debug!("readlink(0x{:x}, …)", args.arg0);
                 Ok((SyscallOutcome::Continue, u32::MAX as u64))
+            }
+            136 => {
+                // mkdir(path, mode)
+                let path = read_c_string(emu, args.arg0)?;
+                eprintln!("[debug] syscall 136 (mkdir): path={:?}, mode=0o{:o}", path, args.arg1);
+                log::info!("mkdir({:?}, 0o{:o})", path, args.arg1);
+                match fs.mkdir(std::path::Path::new(&path)) {
+                    Ok(_) => {
+                        log::info!("mkdir: created successfully");
+                        eprintln!("[debug] syscall 136: success");
+                        Ok((SyscallOutcome::Continue, 0))
+                    },
+                    Err(e) => {
+                        log::warn!("mkdir: failed with error: {:?}", e);
+                        eprintln!("[debug] syscall 136: error: {:?}", e);
+                        Ok((SyscallOutcome::Continue, u32::MAX as u64))
+                    },
+                }
             }
             202 => {
                 // sysctl(name, namelen, oldp, oldlenp, newp, newlen)

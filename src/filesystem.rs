@@ -280,6 +280,14 @@ impl VirtualFileSystem {
         Ok(())
     }
 
+    /// Create a directory at the given path
+    pub fn mkdir(&self, path: &Path) -> EmulationResult<()> {
+        let host_path = self.resolve_path(path)?;
+        std::fs::create_dir(&host_path)
+            .map_err(|e| EmulationError::FileSystemError(format!("mkdir failed: {}", e)))?;
+        Ok(())
+    }
+
     // ── Heap / mmap ──────────────────────────────────────────────────────────
 
     /// Set or query the program break. Passing 0 queries the current break.
