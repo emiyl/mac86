@@ -12,6 +12,8 @@ pub enum LibSym {
     Unlink,
     Rmdir,
     Lstat,
+    Fcopyfile,
+    Rename,
     // FTS (file tree traversal)
     FtsOpen,
     FtsRead,
@@ -196,6 +198,8 @@ pub fn known_symbol(name: &str) -> Option<LibSym> {
         "unlink" | "unlink$UNIX2003" => Some(LibSym::Unlink),
         "rmdir" | "rmdir$UNIX2003" => Some(LibSym::Rmdir),
         "lstat" | "lstat$INODE64" | "lstat$UNIX2003" => Some(LibSym::Lstat),
+        "fcopyfile" => Some(LibSym::Fcopyfile),
+        "rename" => Some(LibSym::Rename),
         "fts_open" | "fts_open$INODE64" => Some(LibSym::FtsOpen),
         "fts_read" | "fts_read$INODE64" => Some(LibSym::FtsRead),
         "fts_close" | "fts_close$INODE64" => Some(LibSym::FtsClose),

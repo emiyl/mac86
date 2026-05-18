@@ -304,6 +304,24 @@ impl VirtualFileSystem {
         Ok(())
     }
 
+    /// Move a file from src to dst
+    pub fn rename(&self, src: &Path, dst: &Path) -> EmulationResult<()> {
+        let host_src = self.resolve_path(src)?;
+        let host_dst = self.resolve_path(dst)?;
+        std::fs::rename(&host_src, &host_dst)
+            .map_err(|e| EmulationError::FileSystemError(format!("rename failed: {}", e)))?;
+        Ok(())
+    }
+
+    /// Copy a file from src to dst
+    pub fn copy(&self, src: &Path, dst: &Path) -> EmulationResult<()> {
+        let host_src = self.resolve_path(src)?;
+        let host_dst = self.resolve_path(dst)?;
+        std::fs::copy(&host_src, &host_dst)
+            .map_err(|e| EmulationError::FileSystemError(format!("copy failed: {}", e)))?;
+        Ok(())
+    }
+
     // ── Heap / mmap ──────────────────────────────────────────────────────────
 
     /// Set or query the program break. Passing 0 queries the current break.

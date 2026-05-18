@@ -150,6 +150,25 @@ fn dispatch(
                 Err(_) => DispatchOutcome::Ret(u32::MAX as u64),
             }
         }
+        LibSym::Fcopyfile => {
+            let src = read_cstr(emu, a0);
+            let dst = read_cstr(emu, a1);
+            match fs.copy(std::path::Path::new(&src), std::path::Path::new(&dst)) {
+                Ok(_) => DispatchOutcome::Ret(0),
+                Err(_) => DispatchOutcome::Ret(u32::MAX as u64),
+            }
+        }
+        LibSym::Rename => {
+            let old_path = read_cstr(emu, a0);
+            let new_path = read_cstr(emu, a1);
+            match fs.rename(
+                std::path::Path::new(&old_path),
+                std::path::Path::new(&new_path),
+            ) {
+                Ok(_) => DispatchOutcome::Ret(0),
+                Err(_) => DispatchOutcome::Ret(u32::MAX as u64),
+            }
+        }
         LibSym::FtsOpen => {
             let argv_ptr = a0;
             let first_path_ptr = read_u32(emu, argv_ptr);
@@ -177,8 +196,7 @@ fn dispatch(
                     let full_path = entry_path.to_string_lossy().to_string();
 
                     // Allocate FTSENT at a fixed location: 0x5fff0000 base
-                    let ftsent_ptr =
-                        0x5fff0000u32 + (handle_id as u32 * 4096) + (idx as u32 * 128);
+                    let ftsent_ptr = 0x5fff0000u32 + (handle_id as u32 * 4096) + (idx as u32 * 128);
 
                     let mut ftsent = vec![0u8; 66 + full_path.len() + 1];
 
@@ -229,7 +247,11 @@ fn dispatch(
         }
         LibSym::FtsClose => {
             let handle_id = (a0 as u32).saturating_sub(0x50000100);
-            DispatchOutcome::Ret(if close_fts_handle(handle_id) { 0 } else { u32::MAX as u64 })
+            DispatchOutcome::Ret(if close_fts_handle(handle_id) {
+                0
+            } else {
+                u32::MAX as u64
+            })
         }
         LibSym::FtsSet => DispatchOutcome::Ret(0),
         LibSym::Getopt => {
@@ -531,15 +553,11 @@ fn dispatch(
         // ── char classification ───────────────────────────────────────────────
         LibSym::Isdigit => DispatchOutcome::Ret(((a0 & 0xFF) as u8).is_ascii_digit() as u64),
         LibSym::Isalpha => DispatchOutcome::Ret(((a0 & 0xFF) as u8).is_ascii_alphabetic() as u64),
-        LibSym::Isalnum => {
-            DispatchOutcome::Ret(((a0 & 0xFF) as u8).is_ascii_alphanumeric() as u64)
-        }
+        LibSym::Isalnum => DispatchOutcome::Ret(((a0 & 0xFF) as u8).is_ascii_alphanumeric() as u64),
         LibSym::Isspace => DispatchOutcome::Ret(((a0 & 0xFF) as u8).is_ascii_whitespace() as u64),
         LibSym::Isupper => DispatchOutcome::Ret(((a0 & 0xFF) as u8).is_ascii_uppercase() as u64),
         LibSym::Islower => DispatchOutcome::Ret(((a0 & 0xFF) as u8).is_ascii_lowercase() as u64),
-        LibSym::Ispunct => {
-            DispatchOutcome::Ret(((a0 & 0xFF) as u8).is_ascii_punctuation() as u64)
-        }
+        LibSym::Ispunct => DispatchOutcome::Ret(((a0 & 0xFF) as u8).is_ascii_punctuation() as u64),
         LibSym::Toupper => DispatchOutcome::Ret(((a0 & 0xFF) as u8).to_ascii_uppercase() as u64),
         LibSym::Tolower => DispatchOutcome::Ret(((a0 & 0xFF) as u8).to_ascii_lowercase() as u64),
 
@@ -841,10 +859,7 @@ fn dispatch(
             DispatchOutcome::Ret(0)
         }
         LibSym::Atan2 => {
-            write_f64_st0(
-                emu,
-                read_f64(emu, esp + 4).atan2(read_f64(emu, esp + 12)),
-            );
+            write_f64_st0(emu, read_f64(emu, esp + 4).atan2(read_f64(emu, esp + 12)));
             DispatchOutcome::Ret(0)
         }
         LibSym::Asin => {
