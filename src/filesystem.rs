@@ -3,12 +3,58 @@ use crate::threads::ThreadTable;
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
 pub struct FileStat {
     pub size: u64,
-    pub is_regular: bool,
+    pub is_file: bool,
     pub is_dir: bool,
+    pub ino: u64,
+}
+
+/// Encode a FileStat into the 120-byte i386 stat struct format.
+pub fn encode_stat_i386(st: &FileStat, buf: &mut [u8]) {
+    assert!(buf.len() >= 120);
+
+    buf.fill(0);
+
+    let mode = if st.is_dir {
+        0o040755 // S_IFDIR | rwxr-xr-x
+    } else {
+        0o100644 // S_IFREG | rw-r--r--
+    };
+
+    let write_u32 = |buf: &mut [u8], off: usize, v: u32| {
+        buf[off..off + 4].copy_from_slice(&v.to_le_bytes());
+    };
+
+    let write_u64 = |buf: &mut [u8], off: usize, v: u64| {
+        buf[off..off + 8].copy_from_slice(&v.to_le_bytes());
+    };
+
+    write_u32(buf, 0, 1); // st_dev (fake)
+    write_u32(buf, 4, st.ino as u32); // st_ino (truncated ok for emu baseline)
+    write_u32(buf, 8, mode); // st_mode
+    write_u32(buf, 12, 1); // st_nlink (default)
+
+    write_u32(buf, 16, 501); // uid (fake user)
+    write_u32(buf, 20, 20); // gid (fake group)
+
+    write_u32(buf, 24, 0); // st_rdev
+
+    write_u64(buf, 32, st.size); // st_size
+
+    write_u32(buf, 40, 4096); // st_blksize
+    write_u32(buf, 44, (st.size / 512) as u32); // st_blocks (rough)
+
+    // timestamps (fake)
+    write_u32(buf, 48, 0); // atime
+    write_u32(buf, 52, 0); // atime ns
+    write_u32(buf, 56, 0); // mtime
+    write_u32(buf, 60, 0); // mtime ns
+    write_u32(buf, 64, 0); // ctime
+    write_u32(buf, 68, 0); // ctime ns
 }
 
 /// Virtual filesystem for the emulation environment
@@ -231,8 +277,9 @@ impl VirtualFileSystem {
         let meta = std::fs::metadata(&file_desc.host_path)?;
         Ok(FileStat {
             size: meta.len(),
-            is_regular: meta.is_file(),
+            is_file: meta.is_file(),
             is_dir: meta.is_dir(),
+            ino: meta.ino(),
         })
     }
 
@@ -242,8 +289,21 @@ impl VirtualFileSystem {
         let meta = std::fs::metadata(&host_path)?;
         Ok(FileStat {
             size: meta.len(),
-            is_regular: meta.is_file(),
+            is_file: meta.is_file(),
             is_dir: meta.is_dir(),
+            ino: meta.ino(),
+        })
+    }
+
+    /// Return stat metadata for a path, without following symlinks.
+    pub fn lstat_path(&self, path: &Path) -> EmulationResult<FileStat> {
+        let host_path = self.resolve_path(path)?;
+        let meta = std::fs::symlink_metadata(&host_path)?;
+        Ok(FileStat {
+            size: meta.len(),
+            is_file: meta.is_file(),
+            is_dir: meta.is_dir(),
+            ino: meta.ino(),
         })
     }
 
@@ -314,11 +374,36 @@ impl VirtualFileSystem {
     }
 
     /// Copy a file from src to dst
-    pub fn copy(&self, src: &Path, dst: &Path) -> EmulationResult<()> {
+    pub fn copyfile(&self, src: &Path, dst: &Path) -> EmulationResult<()> {
         let host_src = self.resolve_path(src)?;
         let host_dst = self.resolve_path(dst)?;
         std::fs::copy(&host_src, &host_dst)
-            .map_err(|e| EmulationError::FileSystemError(format!("copy failed: {}", e)))?;
+            .map_err(|e| EmulationError::FileSystemError(format!("copyfile failed: {}", e)))?;
+        Ok(())
+    }
+
+    /// Copy a file from src_fd to dst_fd (fcopyfile semantics). Both FDs must be open and dst_fd must be writable.
+    pub fn fcopyfile(&self, src_fd: u32, dst_fd: u32) -> EmulationResult<()> {
+        let src_desc = self
+            .file_descriptors
+            .get(&src_fd)
+            .ok_or_else(|| EmulationError::FileSystemError(format!("Invalid FD: {}", src_fd)))?;
+        let dst_desc = self
+            .file_descriptors
+            .get(&dst_fd)
+            .ok_or_else(|| EmulationError::FileSystemError(format!("Invalid FD: {}", dst_fd)))?;
+
+        if !dst_desc.writable {
+            return Err(EmulationError::FileSystemError(format!(
+                "FD {} is not writable",
+                dst_fd
+            )));
+        }
+
+        let mut src_file = File::open(&src_desc.host_path)?;
+        let mut dst_file = OpenOptions::new().write(true).open(&dst_desc.host_path)?;
+
+        std::io::copy(&mut src_file, &mut dst_file)?;
         Ok(())
     }
 

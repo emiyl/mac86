@@ -1,3 +1,4 @@
+use std::path;
 use unicorn_engine::{RegisterX86, Unicorn};
 
 use crate::filesystem::VirtualFileSystem;
@@ -8,7 +9,9 @@ use super::math::{read_f32, read_f64, write_f64_st0};
 use super::mem::{read_bytes, read_cstr, read_cstr_max, read_u32, write_u32};
 use super::printf::{fmt_printf, fmt_printf_str, format_str};
 use super::symbols::LibSym;
-use super::trampoline::{OPTARG_STORAGE_ADDR, OPTIND_STORAGE_ADDR, THREAD_SENTINEL_ADDR};
+use super::trampoline::{
+    ERRNO_STORAGE_ADDR, OPTARG_STORAGE_ADDR, OPTIND_STORAGE_ADDR, THREAD_SENTINEL_ADDR,
+};
 
 pub enum DispatchOutcome {
     Ret(u64),
@@ -70,6 +73,7 @@ fn dispatch(
     ret_addr: u32,
 ) -> DispatchOutcome {
     match sym {
+        LibSym::Error => DispatchOutcome::Ret(ERRNO_STORAGE_ADDR as u64),
         // ── I/O ──────────────────────────────────────────────────────────────
         LibSym::Write => {
             let data = read_bytes(emu, a1, a2 as usize);
@@ -97,7 +101,7 @@ fn dispatch(
         }
         LibSym::Open => {
             let path = read_cstr(emu, a0);
-            match fs.open(std::path::Path::new(&path), (a1 & 0x3) != 0) {
+            match fs.open(path::Path::new(&path), (a1 & 0x3) != 0) {
                 Ok(fd) => DispatchOutcome::Ret(fd as u64),
                 Err(_) => DispatchOutcome::Ret(u32::MAX as u64),
             }
@@ -108,52 +112,65 @@ fn dispatch(
         }
         LibSym::Mkdir => {
             let path = read_cstr(emu, a0);
-            match fs.mkdir(std::path::Path::new(&path)) {
+            match fs.mkdir(path::Path::new(&path)) {
                 Ok(_) => DispatchOutcome::Ret(0),
                 Err(_) => DispatchOutcome::Ret(u32::MAX as u64),
             }
         }
         LibSym::Unlink => {
             let path = read_cstr(emu, a0);
-            match fs.unlink(std::path::Path::new(&path)) {
+            match fs.unlink(path::Path::new(&path)) {
                 Ok(_) => DispatchOutcome::Ret(0),
                 Err(_) => DispatchOutcome::Ret(u32::MAX as u64),
             }
         }
         LibSym::Rmdir => {
             let path = read_cstr(emu, a0);
-            match fs.rmdir(std::path::Path::new(&path)) {
+            match fs.rmdir(path::Path::new(&path)) {
                 Ok(_) => DispatchOutcome::Ret(0),
+                Err(_) => DispatchOutcome::Ret(u32::MAX as u64),
+            }
+        }
+        LibSym::Stat => {
+            let path = read_cstr(emu, a0);
+            let stat_ptr = a1;
+
+            match fs.stat_path(path::Path::new(&path)) {
+                Ok(fst) => {
+                    let mut buf = vec![0u8; 120];
+                    crate::filesystem::encode_stat_i386(&fst, &mut buf);
+                    let _ = emu.mem_write(stat_ptr as u64, &buf);
+                    DispatchOutcome::Ret(0)
+                }
                 Err(_) => DispatchOutcome::Ret(u32::MAX as u64),
             }
         }
         LibSym::Lstat => {
             let path = read_cstr(emu, a0);
             let stat_ptr = a1;
-            match fs.stat_path(std::path::Path::new(&path)) {
-                Ok(fstat) => {
-                    let mode: u32 = if fstat.is_dir { 0x41ED } else { 0x81A4 };
-                    let size: u64 = fstat.size;
 
-                    let mut stat_buf = vec![0u8; 120];
-                    stat_buf[0..4].copy_from_slice(&1u32.to_le_bytes());
-                    stat_buf[4..8].copy_from_slice(&1u32.to_le_bytes());
-                    stat_buf[8..12].copy_from_slice(&mode.to_le_bytes());
-                    stat_buf[12..14].copy_from_slice(&1u16.to_le_bytes());
-                    stat_buf[14..18].copy_from_slice(&501u32.to_le_bytes());
-                    stat_buf[18..22].copy_from_slice(&20u32.to_le_bytes());
-                    stat_buf[40..48].copy_from_slice(&size.to_le_bytes());
-
-                    let _ = emu.mem_write(stat_ptr as u64, &stat_buf);
+            match fs.lstat_path(path::Path::new(&path)) {
+                Ok(fst) => {
+                    let mut buf = vec![0u8; 120];
+                    crate::filesystem::encode_stat_i386(&fst, &mut buf);
+                    let _ = emu.mem_write(stat_ptr as u64, &buf);
                     DispatchOutcome::Ret(0)
                 }
                 Err(_) => DispatchOutcome::Ret(u32::MAX as u64),
             }
         }
         LibSym::Fcopyfile => {
+            let src_fd = a0;
+            let dst_fd = a1;
+            match fs.fcopyfile(src_fd, dst_fd) {
+                Ok(_) => DispatchOutcome::Ret(0),
+                Err(_) => DispatchOutcome::Ret(u32::MAX as u64),
+            }
+        }
+        LibSym::Copyfile => {
             let src = read_cstr(emu, a0);
             let dst = read_cstr(emu, a1);
-            match fs.copy(std::path::Path::new(&src), std::path::Path::new(&dst)) {
+            match fs.copyfile(path::Path::new(&src), path::Path::new(&dst)) {
                 Ok(_) => DispatchOutcome::Ret(0),
                 Err(_) => DispatchOutcome::Ret(u32::MAX as u64),
             }
@@ -161,10 +178,7 @@ fn dispatch(
         LibSym::Rename => {
             let old_path = read_cstr(emu, a0);
             let new_path = read_cstr(emu, a1);
-            match fs.rename(
-                std::path::Path::new(&old_path),
-                std::path::Path::new(&new_path),
-            ) {
+            match fs.rename(path::Path::new(&old_path), path::Path::new(&new_path)) {
                 Ok(_) => DispatchOutcome::Ret(0),
                 Err(_) => DispatchOutcome::Ret(u32::MAX as u64),
             }
@@ -174,7 +188,7 @@ fn dispatch(
             let first_path_ptr = read_u32(emu, argv_ptr);
             let path = read_cstr(emu, first_path_ptr);
 
-            let host_path = match fs.resolve_path(std::path::Path::new(&path)) {
+            let host_path = match fs.resolve_path(path::Path::new(&path)) {
                 Ok(p) => p,
                 Err(_) => return DispatchOutcome::Ret(0),
             };

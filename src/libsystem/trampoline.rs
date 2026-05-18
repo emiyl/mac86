@@ -9,6 +9,7 @@ pub const THREAD_SENTINEL_ADDR: u32 = TRAMPOLINE_BASE + 4;
 pub const SIGNAL_RETURN_ADDR: u32 = TRAMPOLINE_BASE + 8;
 pub const OPTIND_STORAGE_ADDR: u32 = 0x5000_F000;
 pub const OPTARG_STORAGE_ADDR: u32 = 0x5000_F004;
+pub const ERRNO_STORAGE_ADDR: u32 = 0x5000_F008;
 
 pub struct Trampoline {
     pub dispatch: HashMap<u32, LibSym>,

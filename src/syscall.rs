@@ -9,7 +9,7 @@ pub static STOP_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 /// Install host signal handlers that set STOP_REQUESTED.
 pub fn install_signal_handlers() {
-    use nix::sys::signal::{signal, Signal, SigHandler};
+    use nix::sys::signal::{signal, SigHandler, Signal};
     unsafe {
         let _ = signal(Signal::SIGINT, SigHandler::Handler(sigint_handler));
         let _ = signal(Signal::SIGTERM, SigHandler::Handler(sigint_handler));
@@ -44,7 +44,9 @@ pub enum SyscallOutcome {
     /// Handler set PC/ESP directly — skip the normal `set_pc(addr+2)` advance.
     StateSet,
     /// Deliver a guest signal: cpu.rs sets up the handler frame then skips the INT.
-    DeliverSignal { handler: u32 },
+    DeliverSignal {
+        handler: u32,
+    },
 }
 
 impl SyscallHandler {
@@ -79,13 +81,7 @@ impl SyscallHandler {
         if self.trace {
             println!(
                 "[syscall] {} ({}, {}, {}, {}, {}, {})",
-                args.number,
-                args.arg0,
-                args.arg1,
-                args.arg2,
-                args.arg3,
-                args.arg4,
-                args.arg5
+                args.number, args.arg0, args.arg1, args.arg2, args.arg3, args.arg4, args.arg5
             );
         }
         eprintln!("[debug-all-syscalls] number={}", args.number);
@@ -180,7 +176,13 @@ impl SyscallHandler {
                 // mmap(addr, len, prot, flags, fd, off)
                 let flags = args.arg3;
                 let fd_arg = args.arg4 as i32;
-                log::debug!("mmap(0x{:x}, {}, flags=0x{:x}, fd={})", args.arg0, args.arg1, flags, fd_arg);
+                log::debug!(
+                    "mmap(0x{:x}, {}, flags=0x{:x}, fd={})",
+                    args.arg0,
+                    args.arg1,
+                    flags,
+                    fd_arg
+                );
                 let is_anon = (flags & 0x1000) != 0 || fd_arg == -1;
                 if is_anon {
                     match fs.mmap_anon(args.arg1) {
@@ -204,7 +206,6 @@ impl SyscallHandler {
             }
 
             // ── Phase 4 ──────────────────────────────────────────────────────
-
             25 => {
                 // geteuid()
                 Ok((SyscallOutcome::Continue, 0))
@@ -214,7 +215,10 @@ impl SyscallHandler {
                 let path = read_c_string(emu, args.arg0)?;
                 log::debug!("access({:?}, {})", path, args.arg1);
                 let exists = std::path::Path::new(&path).exists();
-                Ok((SyscallOutcome::Continue, if exists { 0 } else { u32::MAX as u64 }))
+                Ok((
+                    SyscallOutcome::Continue,
+                    if exists { 0 } else { u32::MAX as u64 },
+                ))
             }
             39 => {
                 // getppid() — fake parent pid = 1
@@ -303,7 +307,7 @@ impl SyscallHandler {
                 let cmd = args.arg1;
                 log::debug!("fcntl({}, {}, {})", args.arg0, cmd, args.arg2);
                 let result: u64 = match cmd {
-                    0 => 0, // F_DUPFD — simplified: return 0
+                    0 => 0,     // F_DUPFD — simplified: return 0
                     1 | 2 => 0, // F_GETFD / F_SETFD
                     3 => 2,     // F_GETFL — O_RDWR
                     4 => 0,     // F_SETFL
@@ -365,19 +369,22 @@ impl SyscallHandler {
             136 => {
                 // mkdir(path, mode)
                 let path = read_c_string(emu, args.arg0)?;
-                eprintln!("[debug] syscall 136 (mkdir): path={:?}, mode=0o{:o}", path, args.arg1);
+                eprintln!(
+                    "[debug] syscall 136 (mkdir): path={:?}, mode=0o{:o}",
+                    path, args.arg1
+                );
                 log::info!("mkdir({:?}, 0o{:o})", path, args.arg1);
                 match fs.mkdir(std::path::Path::new(&path)) {
                     Ok(_) => {
                         log::info!("mkdir: created successfully");
                         eprintln!("[debug] syscall 136: success");
                         Ok((SyscallOutcome::Continue, 0))
-                    },
+                    }
                     Err(e) => {
                         log::warn!("mkdir: failed with error: {:?}", e);
                         eprintln!("[debug] syscall 136: error: {:?}", e);
                         Ok((SyscallOutcome::Continue, u32::MAX as u64))
-                    },
+                    }
                 }
             }
             202 => {
@@ -504,18 +511,14 @@ fn read_c_string(emu: &mut Unicorn<'_, ()>, addr: u32) -> EmulationResult<String
 ///  48   st_size    i64   56   st_blocks i64   64  st_blksize i32
 ///  68   st_flags   u32   72   st_gen    u32   76  st_lspare i32
 ///  80   st_qspare  16
-fn write_stat_struct(
-    emu: &mut Unicorn<'_, ()>,
-    addr: u32,
-    stat: &FileStat,
-) -> EmulationResult<()> {
+fn write_stat_struct(emu: &mut Unicorn<'_, ()>, addr: u32, stat: &FileStat) -> EmulationResult<()> {
     let mut buf = [0u8; 96];
 
     buf[0..4].copy_from_slice(&1i32.to_le_bytes()); // st_dev
     buf[4..8].copy_from_slice(&1u32.to_le_bytes()); // st_ino
     let mode: u16 = if stat.is_dir {
         0o040_755
-    } else if stat.is_regular {
+    } else if stat.is_file {
         0o100_644
     } else {
         0o020_666 // char device (stdin/stdout/stderr)

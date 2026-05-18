@@ -2,6 +2,7 @@
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum LibSym {
+    Error,
     // I/O
     Write,
     Writev,
@@ -12,7 +13,9 @@ pub enum LibSym {
     Unlink,
     Rmdir,
     Lstat,
+    Stat,
     Fcopyfile,
+    Copyfile,
     Rename,
     // FTS (file tree traversal)
     FtsOpen,
@@ -189,21 +192,24 @@ fn base_name(raw: &str) -> &str {
 
 pub fn known_symbol(name: &str) -> Option<LibSym> {
     match base_name(name) {
+        "error" => Some(LibSym::Error),
         "write" | "write_nocancel" | "pwrite" => Some(LibSym::Write),
         "writev" | "writev_nocancel" => Some(LibSym::Writev),
         "read" | "read_nocancel" | "pread" => Some(LibSym::Read),
         "open" | "open_nocancel" => Some(LibSym::Open),
         "close" | "close_nocancel" => Some(LibSym::Close),
         "mkdir" => Some(LibSym::Mkdir),
-        "unlink" | "unlink$UNIX2003" => Some(LibSym::Unlink),
-        "rmdir" | "rmdir$UNIX2003" => Some(LibSym::Rmdir),
-        "lstat" | "lstat$INODE64" | "lstat$UNIX2003" => Some(LibSym::Lstat),
+        "unlink" => Some(LibSym::Unlink),
+        "rmdir" => Some(LibSym::Rmdir),
+        "lstat" => Some(LibSym::Lstat),
+        "stat" => Some(LibSym::Stat),
         "fcopyfile" => Some(LibSym::Fcopyfile),
+        "copyfile" => Some(LibSym::Copyfile),
         "rename" => Some(LibSym::Rename),
-        "fts_open" | "fts_open$INODE64" => Some(LibSym::FtsOpen),
-        "fts_read" | "fts_read$INODE64" => Some(LibSym::FtsRead),
-        "fts_close" | "fts_close$INODE64" => Some(LibSym::FtsClose),
-        "fts_set" | "fts_set$INODE64" => Some(LibSym::FtsSet),
+        "fts_open" => Some(LibSym::FtsOpen),
+        "fts_read" => Some(LibSym::FtsRead),
+        "fts_close" => Some(LibSym::FtsClose),
+        "fts_set" => Some(LibSym::FtsSet),
         "getopt" => Some(LibSym::Getopt),
         "exit" | "_exit" | "quick_exit" => Some(LibSym::Exit),
         "abort" => Some(LibSym::Abort),
