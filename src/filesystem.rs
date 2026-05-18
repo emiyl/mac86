@@ -13,48 +13,59 @@ pub struct FileStat {
     pub ino: u64,
 }
 
-/// Encode a FileStat into the 120-byte i386 stat struct format.
+/// Encode a FileStat into the 120-byte i386 INODE64 stat struct layout.
+///
+/// macOS 32-bit binaries using `stat$INODE64` / `fstat$INODE64` expect:
+///   offset  0: st_dev      (u32)
+///   offset  4: st_mode     (u16)  ← NOT at offset 8 like the old non-INODE64 layout
+///   offset  6: st_nlink    (u16)
+///   offset  8: st_ino      (u64)  ← 64-bit inode
+///   offset 16: st_uid      (u32)
+///   offset 20: st_gid      (u32)
+///   offset 24: st_rdev     (u32)
+///   offset 28: (4-byte pad before timespec)
+///   offset 32: st_atimespec (8 bytes)
+///   offset 40: st_mtimespec (8 bytes)
+///   offset 48: st_ctimespec (8 bytes)
+///   offset 56: st_birthtimespec (8 bytes)
+///   offset 64: st_size     (u64)  ← NOT at offset 32
+///   offset 72: st_blocks   (u64)
+///   offset 80: st_blksize  (u32)
+///   offset 84: st_flags    (u32)
+///   offset 88: st_gen      (u32)
+///   Total: ~112 bytes (buf is 120 for headroom)
 pub fn encode_stat_i386(st: &FileStat, buf: &mut [u8]) {
-    assert!(buf.len() >= 120);
+    assert!(buf.len() >= 112);
 
     buf.fill(0);
 
-    let mode = if st.is_dir {
+    let mode: u16 = if st.is_dir {
         0o040755 // S_IFDIR | rwxr-xr-x
     } else {
         0o100644 // S_IFREG | rw-r--r--
     };
 
-    let write_u32 = |buf: &mut [u8], off: usize, v: u32| {
+    let w16 = |buf: &mut [u8], off: usize, v: u16| {
+        buf[off..off + 2].copy_from_slice(&v.to_le_bytes());
+    };
+    let w32 = |buf: &mut [u8], off: usize, v: u32| {
         buf[off..off + 4].copy_from_slice(&v.to_le_bytes());
     };
-
-    let write_u64 = |buf: &mut [u8], off: usize, v: u64| {
+    let w64 = |buf: &mut [u8], off: usize, v: u64| {
         buf[off..off + 8].copy_from_slice(&v.to_le_bytes());
     };
 
-    write_u32(buf, 0, 1); // st_dev (fake)
-    write_u32(buf, 4, st.ino as u32); // st_ino (truncated ok for emu baseline)
-    write_u32(buf, 8, mode); // st_mode
-    write_u32(buf, 12, 1); // st_nlink (default)
-
-    write_u32(buf, 16, 501); // uid (fake user)
-    write_u32(buf, 20, 20); // gid (fake group)
-
-    write_u32(buf, 24, 0); // st_rdev
-
-    write_u64(buf, 32, st.size); // st_size
-
-    write_u32(buf, 40, 4096); // st_blksize
-    write_u32(buf, 44, (st.size / 512) as u32); // st_blocks (rough)
-
-    // timestamps (fake)
-    write_u32(buf, 48, 0); // atime
-    write_u32(buf, 52, 0); // atime ns
-    write_u32(buf, 56, 0); // mtime
-    write_u32(buf, 60, 0); // mtime ns
-    write_u32(buf, 64, 0); // ctime
-    write_u32(buf, 68, 0); // ctime ns
+    w32(buf, 0, 1);          // st_dev
+    w16(buf, 4, mode);       // st_mode
+    w16(buf, 6, 1);          // st_nlink
+    w64(buf, 8, st.ino);     // st_ino (64-bit)
+    w32(buf, 16, 501);       // st_uid
+    w32(buf, 20, 20);        // st_gid
+    w32(buf, 24, 0);         // st_rdev
+    // offsets 28-63: timestamps (left as zero)
+    w64(buf, 64, st.size);   // st_size
+    w64(buf, 72, st.size / 512 + if st.size % 512 != 0 { 1 } else { 0 }); // st_blocks
+    w32(buf, 80, 4096);      // st_blksize
 }
 
 /// Virtual filesystem for the emulation environment

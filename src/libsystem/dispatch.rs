@@ -266,6 +266,24 @@ fn dispatch(
                 Some((entry_path, fts_info, level, idx)) => {
                     let full_path = entry_path.to_string_lossy().to_string();
 
+                    // Allocate and populate a stat struct for fts_statp so the binary
+                    // can read st_mode and other fields from the source file.
+                    let stat_ptr = fs.mmap_anon(120).unwrap_or(0);
+                    if stat_ptr != 0 {
+                        use std::os::unix::fs::MetadataExt;
+                        if let Ok(meta) = std::fs::metadata(&entry_path) {
+                            let fst = crate::filesystem::FileStat {
+                                size: meta.len(),
+                                is_file: meta.is_file(),
+                                is_dir: meta.is_dir(),
+                                ino: meta.ino(),
+                            };
+                            let mut stat_buf = vec![0u8; 120];
+                            crate::filesystem::encode_stat_i386(&fst, &mut stat_buf);
+                            let _ = emu.mem_write(stat_ptr as u64, &stat_buf);
+                        }
+                    }
+
                     // Allocate FTSENT at a fixed location: 0x5fff0000 base
                     let ftsent_ptr = 0x5fff0000u32 + (handle_id as u32 * 4096) + (idx as u32 * 128);
 
@@ -286,7 +304,7 @@ fn dispatch(
                     ftsent[36..38].copy_from_slice(&(full_path.len() as u16).to_le_bytes());
                     ftsent[38..40].copy_from_slice(&(full_path.len() as u16).to_le_bytes());
 
-                    // fts_ino (8 bytes)
+                    // fts_ino (8 bytes, INODE64)
                     ftsent[40..48].copy_from_slice(&(idx as u64).to_le_bytes());
 
                     // fts_dev
@@ -304,8 +322,8 @@ fn dispatch(
                     // fts_flags, fts_instr
                     ftsent[58..62].fill(0);
 
-                    // fts_statp (NULL)
-                    ftsent[62..66].fill(0);
+                    // fts_statp — pointer to the stat struct we allocated above
+                    ftsent[62..66].copy_from_slice(&stat_ptr.to_le_bytes());
 
                     // inline filename string
                     ftsent[66..66 + full_path.len()].copy_from_slice(full_path.as_bytes());
