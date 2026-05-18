@@ -4,8 +4,8 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SAMPLES_DIR="$ROOT_DIR/samples"
 SDK_PATH="${MACOSX_I386_SDK:-$HOME/Downloads/MacOSX10.13.sdk}"
-OUT_PATH="${1:-$SAMPLES_DIR/phase1_hello_static}"
-SRC_PATH="${2:-$SAMPLES_DIR/phase1_main.c}"
+OUT_PATH="${1:-$SAMPLES_DIR/phase2}"
+SRC_PATH="${2:-$SAMPLES_DIR/phase2_main.c}"
 BUILD_DIR="$SAMPLES_DIR/.build"
 
 if [[ ! -d "$SDK_PATH" ]]; then

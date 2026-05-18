@@ -1,20 +1,25 @@
 use crate::binary_loader::BinaryInfo;
 use crate::cpu::CpuEmulator;
-use crate::emulator::EmulationContext;
+use crate::emulator::{EmulationContext, TraceConfig};
 use crate::errors::EmulationResult;
 use crate::filesystem::VirtualFileSystem;
 use crate::memory::MemoryManager;
 use crate::syscall::SyscallHandler;
 use log::info;
+use std::cell::RefCell;
+use std::rc::Rc;
 
 /// Represents an emulated i386 process
 pub struct Process {
     binary: BinaryInfo,
+    #[allow(dead_code)]
     memory_manager: MemoryManager,
     syscall_handler: SyscallHandler,
-    filesystem: VirtualFileSystem,
+    filesystem: Rc<RefCell<VirtualFileSystem>>,
     cpu: CpuEmulator,
+    #[allow(dead_code)]
     pid: u32,
+    trace_config: TraceConfig,
 }
 
 impl Process {
@@ -22,20 +27,16 @@ impl Process {
     pub fn new(binary: BinaryInfo, emulation_ctx: &mut EmulationContext) -> EmulationResult<Self> {
         emulation_ctx.initialize()?;
 
-        // Create syscall handler
-        let syscall_handler = SyscallHandler::default();
+        let trace_config = emulation_ctx.trace();
+        let syscall_handler = SyscallHandler::new_with_trace(trace_config.syscalls);
 
-        // Create CPU emulator
         let mut cpu = CpuEmulator::new()?;
 
-        // Define memory regions to allocate
         let total_size = 0x80000000u32; // 2GB virtual address space
-
-        // Allocate large memory region for the entire address space
         cpu.map_memory(0x0, total_size)?;
 
         let memory_manager = MemoryManager::new(total_size as usize);
-        let filesystem = VirtualFileSystem::new();
+        let filesystem = Rc::new(RefCell::new(VirtualFileSystem::new()));
 
         Ok(Process {
             binary,
@@ -44,6 +45,7 @@ impl Process {
             filesystem,
             cpu,
             pid: std::process::id(),
+            trace_config,
         })
     }
 
@@ -114,49 +116,58 @@ impl Process {
         Ok(())
     }
 
-    /// Setup the stack with argc and argv
+    /// Setup the initial stack per the i386 SysV ABI.
+    ///
+    /// Layout at ESP on _start entry:
+    ///   [esp+0]  argc (u32)
+    ///   [esp+4]  argv  (char** → argv_array)
+    ///   [esp+8]  envp  (char** → envp_array, currently empty)
+    ///
+    /// argv_array lives at PTRARRAY_REGION:
+    ///   argv[0], argv[1], ..., NULL
+    ///   NULL  (envp sentinel immediately after)
+    ///
+    /// String data lives at STR_REGION.
+    ///
+    /// After crt0's `call _main`, _main sees argc at [esp+4] and argv at [esp+8].
     fn setup_stack(&mut self, args: &[String]) -> EmulationResult<u32> {
-        const STACK_BASE: u32 = 0x7FFFFFFF; // Near top of 32-bit address space
-        const ARGV_BUFFER_ADDR: u32 = STACK_BASE - 0x100000u32; // Space for strings
-
-        info!("Setting up stack at 0x{:x}", STACK_BASE);
+        const STR_REGION: u32 = 0x7FFE0000;
+        const PTRARRAY_REGION: u32 = 0x7FFD0000;
+        const STACK_TOP: u32 = 0x7FFC0000;
 
         let argc = args.len() as u32;
-        let mut stack_ptr = STACK_BASE;
 
-        // Push argc on stack
-        stack_ptr -= 4;
-        self.cpu.write_memory(stack_ptr, &argc.to_le_bytes())?;
-
-        // Create argv array and write strings
-        let mut argv_ptr = ARGV_BUFFER_ADDR;
-        let mut argv_addrs = Vec::new();
-
+        // 1. Write null-terminated argument strings.
+        let mut str_ptr = STR_REGION;
+        let mut argv_ptrs: Vec<u32> = Vec::with_capacity(args.len());
         for arg in args {
-            argv_addrs.push(argv_ptr);
-
-            // Write argument string
-            let arg_bytes = format!("{}\0", arg);
-            self.cpu.write_memory(argv_ptr, arg_bytes.as_bytes())?;
-            argv_ptr += arg_bytes.len() as u32;
-
-            // Align to 4 bytes
-            argv_ptr = (argv_ptr + 3) & !3;
+            argv_ptrs.push(str_ptr);
+            let mut bytes = arg.as_bytes().to_vec();
+            bytes.push(0);
+            self.cpu.write_memory(str_ptr, &bytes)?;
+            str_ptr += bytes.len() as u32;
         }
 
-        // Push argv pointers on stack (in reverse order for System V ABI)
-        for addr in argv_addrs {
-            stack_ptr -= 4;
-            self.cpu.write_memory(stack_ptr, &addr.to_le_bytes())?;
+        // 2. Write argv pointer array followed by argv NULL then envp NULL.
+        let mut arr_ptr = PTRARRAY_REGION;
+        for &p in &argv_ptrs {
+            self.cpu.write_memory(arr_ptr, &p.to_le_bytes())?;
+            arr_ptr += 4;
         }
+        self.cpu.write_memory(arr_ptr, &0u32.to_le_bytes())?; // argv NULL sentinel
+        arr_ptr += 4;
+        let envp_array_addr = arr_ptr;
+        self.cpu.write_memory(arr_ptr, &0u32.to_le_bytes())?; // envp NULL sentinel
 
-        // Push argv pointer
-        stack_ptr -= 4;
-        self.cpu
-            .write_memory(stack_ptr, &ARGV_BUFFER_ADDR.to_le_bytes())?;
+        // 3. Write [argc, argv**, envp**] at the stack top, 16-byte aligned.
+        let mut esp = STACK_TOP - 12;
+        esp &= !0xF;
+        self.cpu.write_memory(esp, &argc.to_le_bytes())?;
+        self.cpu.write_memory(esp + 4, &PTRARRAY_REGION.to_le_bytes())?;
+        self.cpu.write_memory(esp + 8, &envp_array_addr.to_le_bytes())?;
 
-        info!("Stack setup complete: ESP=0x{:x}", stack_ptr);
-        Ok(stack_ptr)
+        info!("Stack setup complete: ESP=0x{:x}", esp);
+        Ok(esp)
     }
 
     /// Execute the process with given arguments
@@ -170,13 +181,17 @@ impl Process {
         // Load binary into memory
         self.load_binary_into_memory()?;
 
-        // Setup syscall hook
-        self.cpu.setup_syscall_hook(&self.syscall_handler)?;
+        // Setup syscall hook and optional instruction trace
+        self.cpu.setup_syscall_hook(
+            self.syscall_handler,
+            Rc::clone(&self.filesystem),
+            self.trace_config.instructions,
+        )?;
 
         // Setup stack with arguments
         let stack_ptr = self.setup_stack(args)?;
 
-        // Initialize CPU state
+        // Initialize CPU state; EBP=0 marks the outermost frame per the ABI.
         self.cpu
             .init_cpu_state(self.binary.entry_point, stack_ptr)?;
 

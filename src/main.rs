@@ -1,15 +1,7 @@
-mod binary_loader;
-mod cpu;
-mod emulator;
-mod errors;
-mod filesystem;
-mod memory;
-mod process;
-mod syscall;
-
 use anyhow::Result;
 use clap::Parser;
 use log::info;
+use mac86::{binary_loader, emulator, process};
 use std::path::PathBuf;
 
 /// i386 macOS emulator for arm64 Macs
@@ -32,6 +24,14 @@ struct Args {
     /// Path to the emulation environment (optional)
     #[arg(short, long)]
     env_path: Option<PathBuf>,
+
+    /// Print each syscall number and arguments as they execute
+    #[arg(long)]
+    trace_syscalls: bool,
+
+    /// Print each instruction address as it executes
+    #[arg(long)]
+    trace_instr: bool,
 }
 
 fn main() -> Result<()> {
@@ -52,7 +52,11 @@ fn main() -> Result<()> {
     info!("Target binary: {}", args.binary.display());
 
     // Create the emulation environment
-    let mut emulation_context = emulator::EmulationContext::new(args.env_path)?;
+    let trace = emulator::TraceConfig {
+        syscalls: args.trace_syscalls,
+        instructions: args.trace_instr,
+    };
+    let mut emulation_context = emulator::EmulationContext::new(args.env_path, trace)?;
 
     // Load the binary
     let binary_info = binary_loader::load_binary(&args.binary)?;

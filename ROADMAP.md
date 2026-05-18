@@ -1,114 +1,81 @@
 # Implementation Roadmap
 
-## Phase 1: Foundation (Current)
+## Phase 1: Foundation ✅
 - [x] Project structure and module organization
-- [x] Binary loading (Mach-O parser)
+- [x] Binary loading (Mach-O static parser)
 - [x] Error handling framework
-- [x] Memory management system
-- [x] Syscall dispatch infrastructure
-- [x] Virtual filesystem abstraction
-- [x] Process management skeleton
-- [ ] Build and basic compilation
+- [x] Memory management (Unicorn-backed 2 GB flat map)
+- [x] Syscall dispatch infrastructure (INT 0x80, register convention)
+- [x] Virtual filesystem abstraction (VFS with host passthrough)
+- [x] Process management and execution loop
+- [x] Sample freestanding binary (`phase1_hello_static`)
 
-## Phase 2: CPU Emulation
-- [ ] Integrate Unicorn Engine
-- [ ] Initialize x86/i386 CPU state
-- [ ] Implement instruction dispatch hooks
-- [ ] Implement exception/interrupt handlers
-- [ ] Map memory regions to Unicorn
-- [ ] Load binary code into emulated memory
-- [ ] Basic instruction execution
+## Phase 2: Tiny Userland ABI ✅
+- [x] Unicorn Engine integration (x86/i386, code hooks)
+- [x] Correct i386 SysV startup stack (argc/argv*/envp*)
+- [x] INT 0x80 → syscall module wiring
+- [x] exit, read, write, open, close, stat, fstat, lseek
+- [x] brk (heap) and anonymous mmap/munmap
+- [x] getpid, getuid
+- [x] `--trace-syscalls` and `--trace-instr` flags
+- [x] Golden tests for sample binaries (`tests/golden.rs`)
+- [x] lib/bin split (`src/lib.rs`) enabling integration tests
+- [x] Phase 2 sample program (`phase2_main.c`)
 
-## Phase 3: Essential Syscalls
-- [ ] Implement exit() fully
-- [ ] Implement read/write for basic I/O
-- [ ] Implement open/close for file operations
-- [ ] Implement mmap/munmap for memory mapping
-- [ ] Implement stat/fstat for file metadata
-- [ ] Implement brk for heap management
-- [ ] Implement getpid/getuid/geteuid
+## Phase 3: Dynamic Linking — First Slice 🔄
+- [x] Parse LC_DYLD_INFO bind + lazy-bind opcodes
+- [x] Fallback: classic LC_DYSYMTAB + section `reserved1` binding
+- [x] LC_MAIN support (direct entry to `main()`, bypasses crt1)
+- [x] Remove dynamic-binary rejection; allow dynamically linked MH_EXECUTE
+- [x] libSystem trampoline region (0x50000000, one slot per import)
+- [x] Load-time symbol resolution: fill `__nl_symbol_ptr` / `__la_symbol_ptr` slots
+- [x] libSystem handlers: write, read, open, close, exit, malloc, free, calloc
+- [x] libSystem handlers: puts, printf (common format specifiers), fprintf, strlen,
+       strcmp, strcpy, memcpy, memset, memmove
+- [ ] Symbol version suffix stripping (`$NOCANCEL$UNIX2003` etc.)
+- [ ] Weak bindings
+- [ ] Rebase opcodes (ASLR — currently assumes zero slide)
+- [ ] Lazy binding fallback (dyld_stub_binder interception)
 
-## Phase 4: Testing & Debugging
-- [ ] Create minimal i386 test binaries
-- [ ] Write unit tests for each module
-- [ ] Add integration tests
-- [ ] Debug with real i386 applications
-- [ ] Performance profiling
+## Phase 4: Broader Syscall Coverage
+- [ ] fcntl, ioctl, dup/dup2
+- [ ] select / poll
+- [ ] sysctl (basic: hw.ncpu, kern.osrelease)
+- [ ] sigaction / sigprocmask (minimal, no real delivery)
+- [ ] gettimeofday, clock_gettime
+- [ ] readdir / getdents
+- [ ] mprotect
+- [ ] Errno mapping (EAX = -errno on error, not just -1)
 
-## Phase 5: Advanced Features
-- [ ] Multi-threading support
-- [ ] Signal handling
-- [ ] Dynamic linking (dlopen)
-- [ ] More syscalls (fork, pipe, etc.)
-- [ ] Environment variables
-- [ ] Command-line arguments
+## Phase 5: Threads & Signals
+- [ ] pthread_create / pthread_join (Unicorn multi-instance approach)
+- [ ] pthread_mutex_lock/unlock (host mutex passthrough)
+- [ ] Signal delivery (SIGTERM, SIGINT, SIGHUP)
+- [ ] setjmp / longjmp (already works via register save/restore)
 
-## Phase 6: Compatibility
-- [ ] Standard C library functions
-- [ ] Common frameworks
-- [ ] Graphics/GUI support (stretch goal)
-- [ ] Networking (stretch goal)
+## Phase 6: Advanced Dynamic Linking
+- [ ] Multiple dylib loading (libm, libc++, CoreFoundation stubs)
+- [ ] dlopen / dlsym / dlclose
+- [ ] ASLR slide computation and rebase
+- [ ] Objective-C runtime stubs (enough for NSLog)
+- [ ] Lazy binding (dyld_stub_binder simulation)
 
-## Technical Debt & TODOs
+## Phase 7: Real-World Compatibility
+- [ ] Fat/Universal binary support (extract i386 slice)
+- [ ] Exception handling (Mach exceptions → signals)
+- [ ] Core Foundation minimal stubs
+- [ ] Graphics/UI: headless NSApplication stub
+- [ ] Networking (socket syscalls passthrough)
 
-### memory.rs
-- [ ] Implement page-based protection
-- [ ] Add COW (copy-on-write) support
-- [ ] Optimize memory region lookups
+---
 
-### syscall.rs
-- [ ] Implement remaining BSD syscalls (~150 total)
-- [ ] Add errno mapping (i386 → arm64)
-- [ ] Handle signal-safe syscalls
+## Technical Debt
 
-### filesystem.rs
-- [ ] Implement readdir properly
-- [ ] Add file locking support
-- [ ] Handle special files (/dev/*, /proc/*)
-
-### process.rs
-- [ ] Load sections into memory
-- [ ] Setup proper stack frame
-- [ ] Initialize all CPU registers
-- [ ] Implement process cleanup
-
-### binary_loader.rs
-- [ ] Support Fat/Universal binaries
-- [ ] Handle dylibs properly
-- [ ] Parse LC_MAIN more robustly
-- [ ] Validate against ARM64 incompatibilities
-
-## Documentation Needed
-- [ ] Syscall translation table
-- [ ] Mach-O format reference guide
-- [ ] i386 register diagram
-- [ ] Memory layout diagram
-- [ ] Contributing guidelines
-- [ ] Debugging guide
-
-## Testing Strategy
-
-### Unit Tests
-- Memory allocation/deallocation
-- Syscall dispatch routing
-- Path resolution
-- Binary parsing
-
-### Integration Tests
-- Simple "Hello World" program
-- File I/O operations
-- Memory allocation tests
-- Syscall translation accuracy
-
-### Real-World Tests
-- Legacy applications from the wild
-- Open-source i386 macOS projects
-- Benchmark suite
-
-## Known Issues to Address
-
-1. **Unicorn Integration**: Need to handle CPU state properly
-2. **Mach-O Parsing**: Fat binaries not yet supported
-3. **Error Propagation**: Some errors could be more specific
-4. **Performance**: No optimization yet
-5. **Thread Safety**: Not thread-safe in current implementation
+| Area | Item |
+|------|------|
+| `memory.rs` | MemoryManager unused after Unicorn flat-map; remove or repurpose for mmap tracking |
+| `syscall.rs` | Full errno mapping (ENOENT, EACCES, EBADF, …) |
+| `filesystem.rs` | readdir, symlink, `/dev/null`, `/dev/random` |
+| `binary_loader.rs` | Fat binary slice extraction |
+| `process.rs` | envp population (currently empty) |
+| tests | stdout capture in golden tests (needs VFS output-buffer mode) |

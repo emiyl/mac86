@@ -1,17 +1,31 @@
 use crate::errors::{EmulationError, EmulationResult};
 use std::collections::HashMap;
+use std::fs::{File, OpenOptions};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+
+pub struct FileStat {
+    pub size: u64,
+    pub is_regular: bool,
+    pub is_dir: bool,
+}
 
 /// Virtual filesystem for the emulation environment
 pub struct VirtualFileSystem {
     /// Mapping of emulated paths to host paths
     mounts: HashMap<PathBuf, PathBuf>,
-    
+
     /// Open file descriptors
     file_descriptors: HashMap<u32, FileDescriptor>,
-    
+
     /// Next available file descriptor
     next_fd: u32,
+
+    /// Program break for brk(2). Starts well above typical binary load address.
+    heap_break: u32,
+
+    /// Bump pointer for anonymous mmap allocations.
+    mmap_next: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -27,6 +41,8 @@ impl VirtualFileSystem {
             mounts: HashMap::new(),
             file_descriptors: HashMap::new(),
             next_fd: 3, // stdin, stdout, stderr are 0, 1, 2
+            heap_break: 0x1000_0000, // 256 MB — above any typical static binary
+            mmap_next: 0x2000_0000,  // 512 MB — anonymous mmap region
         };
 
         // Mount standard file descriptors
@@ -73,15 +89,12 @@ impl VirtualFileSystem {
 
     /// Resolve an emulated path to a host path
     pub fn resolve_path(&self, path: &Path) -> EmulationResult<PathBuf> {
-        // Check if path matches any mount point
         for (emulated, host) in &self.mounts {
             if path.starts_with(emulated) {
                 let relative = path.strip_prefix(emulated).unwrap_or(Path::new(""));
                 return Ok(host.join(relative));
             }
         }
-
-        // Default: treat as relative to current directory
         Ok(PathBuf::from(path))
     }
 
@@ -90,7 +103,6 @@ impl VirtualFileSystem {
         let host_path = self.resolve_path(path)?;
 
         if !host_path.exists() && writable {
-            // Create file if it doesn't exist
             std::fs::write(&host_path, &[])?;
         } else if !host_path.exists() {
             return Err(EmulationError::FileSystemError(format!(
@@ -114,32 +126,44 @@ impl VirtualFileSystem {
         Ok(fd)
     }
 
-    /// Close a file descriptor
-    pub fn close(&mut self, fd: u32) -> EmulationResult<()> {
-        self.file_descriptors
-            .remove(&fd)
-            .ok_or_else(|| EmulationError::FileSystemError(format!("Invalid FD: {}", fd)))?;
-        Ok(())
-    }
+    /// Read raw bytes from a file descriptor
+    pub fn read_bytes(&mut self, fd: u32, size: usize) -> EmulationResult<Vec<u8>> {
+        if fd == 0 {
+            let mut input = vec![0u8; size];
+            let n = std::io::stdin().read(&mut input)?;
+            input.truncate(n);
+            return Ok(input);
+        }
 
-    /// Read from a file descriptor
-    pub fn read(&mut self, fd: u32, _buf_addr: u32, size: usize) -> EmulationResult<usize> {
         let file_desc = self
             .file_descriptors
             .get_mut(&fd)
             .ok_or_else(|| EmulationError::FileSystemError(format!("Invalid FD: {}", fd)))?;
 
-        let content = std::fs::read(&file_desc.host_path)?;
-        let to_read = std::cmp::min(size, content.len() - file_desc.offset as usize);
+        let mut file = File::open(&file_desc.host_path)?;
+        file.seek(SeekFrom::Start(file_desc.offset))?;
 
-        // In a real implementation, write to emulated memory at buf_addr
-        file_desc.offset += to_read as u64;
-
-        Ok(to_read)
+        let mut buf = vec![0u8; size];
+        let n = file.read(&mut buf)?;
+        file_desc.offset += n as u64;
+        buf.truncate(n);
+        Ok(buf)
     }
 
-    /// Write to a file descriptor
-    pub fn write(&mut self, fd: u32, _buf_addr: u32, size: usize) -> EmulationResult<usize> {
+    /// Write raw bytes to a file descriptor
+    pub fn write_bytes(&mut self, fd: u32, data: &[u8]) -> EmulationResult<usize> {
+        if fd == 1 {
+            std::io::stdout().write_all(data)?;
+            std::io::stdout().flush()?;
+            return Ok(data.len());
+        }
+
+        if fd == 2 {
+            std::io::stderr().write_all(data)?;
+            std::io::stderr().flush()?;
+            return Ok(data.len());
+        }
+
         let file_desc = self
             .file_descriptors
             .get_mut(&fd)
@@ -152,10 +176,112 @@ impl VirtualFileSystem {
             )));
         }
 
-        // In a real implementation, read from emulated memory at buf_addr
-        file_desc.offset += size as u64;
+        let mut file = OpenOptions::new().write(true).open(&file_desc.host_path)?;
+        file.seek(SeekFrom::Start(file_desc.offset))?;
+        let written = file.write(data)?;
+        file_desc.offset += written as u64;
+        Ok(written)
+    }
 
-        Ok(size)
+    /// Seek a file descriptor. Returns the new offset.
+    ///
+    /// whence: 0 = SEEK_SET, 1 = SEEK_CUR, 2 = SEEK_END
+    pub fn seek(&mut self, fd: u32, offset: i64, whence: i32) -> EmulationResult<u64> {
+        let file_desc = self
+            .file_descriptors
+            .get_mut(&fd)
+            .ok_or_else(|| EmulationError::FileSystemError(format!("Invalid FD: {}", fd)))?;
+
+        let new_offset: u64 = match whence {
+            0 => offset as u64,
+            1 => (file_desc.offset as i64).wrapping_add(offset) as u64,
+            2 => {
+                let size = std::fs::metadata(&file_desc.host_path)?.len();
+                (size as i64).wrapping_add(offset) as u64
+            }
+            _ => {
+                return Err(EmulationError::FileSystemError(format!(
+                    "Invalid lseek whence: {}",
+                    whence
+                )))
+            }
+        };
+
+        file_desc.offset = new_offset;
+        Ok(new_offset)
+    }
+
+    /// Return stat metadata for an open file descriptor.
+    pub fn fstat_fd(&self, fd: u32) -> EmulationResult<FileStat> {
+        let file_desc = self
+            .file_descriptors
+            .get(&fd)
+            .ok_or_else(|| EmulationError::FileSystemError(format!("Invalid FD: {}", fd)))?;
+
+        let meta = std::fs::metadata(&file_desc.host_path)?;
+        Ok(FileStat {
+            size: meta.len(),
+            is_regular: meta.is_file(),
+            is_dir: meta.is_dir(),
+        })
+    }
+
+    /// Return stat metadata for a path.
+    pub fn stat_path(&self, path: &Path) -> EmulationResult<FileStat> {
+        let host_path = self.resolve_path(path)?;
+        let meta = std::fs::metadata(&host_path)?;
+        Ok(FileStat {
+            size: meta.len(),
+            is_regular: meta.is_file(),
+            is_dir: meta.is_dir(),
+        })
+    }
+
+    /// Close a file descriptor
+    pub fn close(&mut self, fd: u32) -> EmulationResult<()> {
+        self.file_descriptors
+            .remove(&fd)
+            .ok_or_else(|| EmulationError::FileSystemError(format!("Invalid FD: {}", fd)))?;
+        Ok(())
+    }
+
+    /// Read from a file descriptor
+    pub fn read(&mut self, fd: u32, _buf_addr: u32, size: usize) -> EmulationResult<usize> {
+        Ok(self.read_bytes(fd, size)?.len())
+    }
+
+    /// Write to a file descriptor
+    pub fn write(&mut self, fd: u32, _buf_addr: u32, size: usize) -> EmulationResult<usize> {
+        Ok(self.write_bytes(fd, &vec![0u8; size])?)
+    }
+
+    // ── Heap / mmap ──────────────────────────────────────────────────────────
+
+    /// Set or query the program break. Passing 0 queries the current break.
+    /// Returns the (possibly new) program break.
+    pub fn brk(&mut self, new_break: u32) -> u32 {
+        if new_break > self.heap_break {
+            self.heap_break = new_break;
+        }
+        self.heap_break
+    }
+
+    /// Allocate an anonymous region of `len` bytes and return its base address.
+    /// Unicorn already has the full 2 GB mapped, so we just bump the pointer.
+    pub fn mmap_anon(&mut self, len: u32) -> EmulationResult<u32> {
+        if len == 0 {
+            return Err(EmulationError::MemoryError(
+                "mmap: zero-length mapping".into(),
+            ));
+        }
+        let addr = self.mmap_next;
+        // Round up to page boundary (4096 bytes)
+        let aligned_len = (len + 0xFFF) & !0xFFF;
+        self.mmap_next = self
+            .mmap_next
+            .checked_add(aligned_len)
+            .ok_or_else(|| EmulationError::MemoryError("mmap: address space exhausted".into()))?;
+        Ok(addr)
     }
 }
 

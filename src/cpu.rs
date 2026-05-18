@@ -1,7 +1,10 @@
 use crate::errors::{EmulationError, EmulationResult};
+use crate::filesystem::VirtualFileSystem;
 use crate::syscall::SyscallHandler;
+use crate::syscall::{SyscallArgs, SyscallOutcome};
 use log::{debug, info};
-use std::io::{self, Read, Write};
+use std::cell::RefCell;
+use std::rc::Rc;
 use unicorn_engine::unicorn_const::{Arch, Mode, Prot};
 use unicorn_engine::{RegisterX86, Unicorn};
 
@@ -67,89 +70,90 @@ impl CpuEmulator {
         Ok(value as u32)
     }
 
-    /// Setup syscall hook with the provided handler
-    pub fn setup_syscall_hook(&mut self, _handler: &SyscallHandler) -> EmulationResult<()> {
-        // Add a code hook to intercept the INT 0x80 two-byte sequence (0xCD 0x80).
-        // This runs before instruction execution; when we detect the INT instruction
-        // we emulate the syscall here and advance the PC to skip the instruction.
+    /// Setup syscall hook and optional instruction trace hook.
+    ///
+    /// The syscall hook intercepts `INT 0x80` in the code stream. Syscall args
+    /// follow the Linux i386 register convention: EAX=num, EBX..EBP=args.
+    /// The return value is 64-bit; the low word goes to EAX, the high word to
+    /// EDX (used by lseek and similar syscalls that return a 64-bit result).
+    ///
+    /// When `trace_instr` is true a second code hook prints every instruction
+    /// address to stdout, prefixed with `[instr]`.
+    pub fn setup_syscall_hook(
+        &mut self,
+        handler: SyscallHandler,
+        fs: Rc<RefCell<VirtualFileSystem>>,
+        trace_instr: bool,
+    ) -> EmulationResult<()> {
         self.emu
             .add_code_hook(
                 0,
                 u64::MAX,
-                |emu: &mut Unicorn<'_, ()>, addr: u64, _size: u32| {
-                    // Read two bytes at `addr` safely
+                move |emu: &mut Unicorn<'_, ()>, addr: u64, _size: u32| {
                     let mut op = [0u8; 2];
                     if emu.mem_read(addr, &mut op).is_err() {
                         return;
                     }
-                    // INT imm8 instruction is 0xCD imm8
-                    if op[0] != 0xCD {
-                        return;
-                    }
-                    if op[1] != 0x80 {
+                    if op[0] != 0xCD || op[1] != 0x80 {
                         return;
                     }
 
-                    // It's INT 0x80 - handle syscall
-                    let syscall_no = emu.reg_read(RegisterX86::EAX).unwrap_or(0) as u32;
-                    let arg0 = emu.reg_read(RegisterX86::EBX).unwrap_or(0) as u32;
-                    let arg1 = emu.reg_read(RegisterX86::ECX).unwrap_or(0) as u32;
-                    let arg2 = emu.reg_read(RegisterX86::EDX).unwrap_or(0) as u32;
+                    let args = SyscallArgs {
+                        number: emu.reg_read(RegisterX86::EAX).unwrap_or(0) as u32,
+                        arg0: emu.reg_read(RegisterX86::EBX).unwrap_or(0) as u32,
+                        arg1: emu.reg_read(RegisterX86::ECX).unwrap_or(0) as u32,
+                        arg2: emu.reg_read(RegisterX86::EDX).unwrap_or(0) as u32,
+                        arg3: emu.reg_read(RegisterX86::ESI).unwrap_or(0) as u32,
+                        arg4: emu.reg_read(RegisterX86::EDI).unwrap_or(0) as u32,
+                        arg5: emu.reg_read(RegisterX86::EBP).unwrap_or(0) as u32,
+                    };
 
-                    match syscall_no {
-                        1 => {
-                            // exit(status)
-                            let status = arg0 as i32;
+                    let result = {
+                        let mut fs_guard = fs.borrow_mut();
+                        handler.handle_syscall(emu, &mut fs_guard, args)
+                    };
+
+                    match result {
+                        Ok((SyscallOutcome::Continue, retval)) => {
+                            let _ = emu.reg_write(RegisterX86::EAX, retval & 0xFFFF_FFFF);
+                            let _ = emu.reg_write(RegisterX86::EDX, retval >> 32);
+                        }
+                        Ok((SyscallOutcome::Exit(status), _)) => {
                             log::info!("sys_exit({})", status);
+                            let _ = emu.reg_write(RegisterX86::EAX, 0);
                             let _ = emu.emu_stop();
                         }
-                        4 => {
-                            // write(fd, buf, count)
-                            let fd = arg0;
-                            let buf = arg1 as u64;
-                            let count = arg2 as usize;
-                            log::debug!("sys_write(fd={}, buf=0x{:x}, count={})", fd, buf, count);
-                            if count == 0 {
-                                let _ = emu.reg_write(RegisterX86::EAX, 0);
-                            } else {
-                                let mut out = vec![0u8; count];
-                                if emu.mem_read(buf, &mut out).is_ok() {
-                                    if fd == 1 || fd == 2 {
-                                        let _ = io::stdout().write_all(&out);
-                                        let _ = io::stdout().flush();
-                                    }
-                                    let _ = emu.reg_write(RegisterX86::EAX, count as u64);
-                                } else {
-                                    let _ = emu.reg_write(RegisterX86::EAX, u64::MAX);
-                                }
-                            }
-                        }
-                        3 => {
-                            // read(fd, buf, count)
-                            let fd = arg0;
-                            let buf = arg1 as u64;
-                            let count = arg2 as usize;
-                            log::debug!("sys_read(fd={}, buf=0x{:x}, count={})", fd, buf, count);
-                            let mut input = vec![0u8; count];
-                            let n = io::stdin().read(&mut input).unwrap_or(0);
-                            if n > 0 {
-                                let _ = emu.mem_write(buf, &input[..n]);
-                            }
-                            let _ = emu.reg_write(RegisterX86::EAX, n as u64);
-                        }
-                        _ => {
-                            log::warn!("Unimplemented syscall: {}", syscall_no);
-                            let _ = emu.reg_write(RegisterX86::EAX, u64::MAX);
+                        Err(err) => {
+                            log::warn!("syscall error: {}", err);
+                            // Return -1 in EAX; leave EDX unchanged.
+                            let _ = emu.reg_write(RegisterX86::EAX, 0xFFFF_FFFF);
                         }
                     }
 
-                    // Advance PC to skip the INT instruction (2 bytes)
+                    // Skip the 2-byte INT instruction.
                     let _ = emu.set_pc(addr + 2);
                 },
             )
             .map_err(|e| {
-                EmulationError::EmulationError(format!("Failed to add code hook: {:?}", e))
+                EmulationError::EmulationError(format!("Failed to add syscall hook: {:?}", e))
             })?;
+
+        if trace_instr {
+            self.emu
+                .add_code_hook(
+                    0,
+                    u64::MAX,
+                    |_emu: &mut Unicorn<'_, ()>, addr: u64, size: u32| {
+                        println!("[instr] @ 0x{:08x}  ({} bytes)", addr, size);
+                    },
+                )
+                .map_err(|e| {
+                    EmulationError::EmulationError(format!(
+                        "Failed to add instruction trace hook: {:?}",
+                        e
+                    ))
+                })?;
+        }
 
         debug!("Syscall hook setup");
         Ok(())
@@ -163,8 +167,8 @@ impl CpuEmulator {
         // Set stack pointer
         self.set_register(RegisterX86::ESP, stack_ptr)?;
 
-        // Set base pointer
-        self.set_register(RegisterX86::EBP, stack_ptr)?;
+        // EBP=0 marks the outermost call frame (no caller).
+        self.set_register(RegisterX86::EBP, 0)?;
 
         // Initialize other registers to 0
         for reg in &[

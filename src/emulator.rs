@@ -1,6 +1,12 @@
 use crate::errors::{EmulationError, EmulationResult};
 use std::path::PathBuf;
 
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TraceConfig {
+    pub syscalls: bool,
+    pub instructions: bool,
+}
+
 /// Main emulation context managing the entire i386 environment
 pub struct EmulationContext {
     /// Path to the emulation environment
@@ -8,6 +14,9 @@ pub struct EmulationContext {
 
     /// Emulation state
     state: EmulationState,
+
+    /// Trace configuration
+    trace_config: TraceConfig,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -20,7 +29,7 @@ pub enum EmulationState {
 
 impl EmulationContext {
     /// Create a new emulation context
-    pub fn new(env_path: Option<PathBuf>) -> EmulationResult<Self> {
+    pub fn new(env_path: Option<PathBuf>, trace_config: TraceConfig) -> EmulationResult<Self> {
         let env_path = env_path.unwrap_or_else(|| {
             let mut path = dirs::cache_dir().unwrap_or_else(|| PathBuf::from("/tmp"));
             path.push("mac86_env");
@@ -33,7 +42,12 @@ impl EmulationContext {
         Ok(EmulationContext {
             env_path,
             state: EmulationState::Uninitialized,
+            trace_config,
         })
+    }
+
+    pub fn trace(&self) -> TraceConfig {
+        self.trace_config
     }
 
     /// Get the emulation environment path
