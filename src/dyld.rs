@@ -51,14 +51,16 @@ impl DyldBindings {
                 let s = info.bind_off as usize;
                 let e = s + info.bind_size as usize;
                 if e <= raw.len() {
-                    parse_bind_opcodes(&raw[s..e], &segments, &mut imports);
+                    parse_bind_opcodes(&raw[s..e], &segments, &mut imports, false);
                 }
             }
             if info.lazy_bind_size > 0 {
                 let s = info.lazy_bind_off as usize;
                 let e = s + info.lazy_bind_size as usize;
                 if e <= raw.len() {
-                    parse_bind_opcodes(&raw[s..e], &segments, &mut imports);
+                    // In the lazy-bind stream, DONE (0x00) is a per-symbol
+                    // separator, NOT an end-of-stream marker.
+                    parse_bind_opcodes(&raw[s..e], &segments, &mut imports, true);
                 }
             }
 
@@ -79,6 +81,7 @@ fn parse_bind_opcodes(
     opcodes: &[u8],
     segments: &[SegInfo],
     out: &mut Vec<ImportBinding>,
+    is_lazy: bool,
 ) {
     let mut pos = 0;
     let mut sym_name = String::new();
@@ -92,7 +95,15 @@ fn parse_bind_opcodes(
         pos += 1;
 
         match opcode {
-            0x00 => break, // DONE
+            0x00 => {
+                // DONE: ends the stream for regular bind; ends one symbol's
+                // record for lazy-bind (more symbols may follow).
+                if is_lazy {
+                    sym_name = String::new(); // reset for next symbol
+                } else {
+                    break;
+                }
+            }
             0x10 => {}     // SET_DYLIB_ORDINAL_IMM
             0x20 => {
                 read_uleb128(opcodes, &mut pos);

@@ -263,7 +263,13 @@ impl Trampoline {
 
         let mut slot = 3u32;
         for imp in &bindings.imports {
-            let Some(sym) = known_symbol(&imp.name) else { continue };
+            // Unknown symbols fall back to Stub0 (return 0, log at debug level).
+            // This ensures every pointer slot gets filled with a valid trampoline
+            // address; no stub-helper code is ever reached.
+            let sym = known_symbol(&imp.name).unwrap_or_else(|| {
+                log::debug!("unknown import {:?} → Stub0", imp.name);
+                LibSym::Stub0
+            });
             let addr = *sym_to_addr.entry(sym).or_insert_with(|| {
                 let a = TRAMPOLINE_BASE + slot * 4;
                 slot += 1;

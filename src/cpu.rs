@@ -166,6 +166,28 @@ impl CpuEmulator {
                 })?;
         }
 
+        // Memory-fault hook: log the exact address before Unicorn terminates.
+        self.emu
+            .add_mem_hook(
+                unicorn_engine::unicorn_const::HookType::MEM_INVALID,
+                0,
+                u64::MAX,
+                |emu, mem_type, addr, size, _value| {
+                    let eip = emu.reg_read(RegisterX86::EIP).unwrap_or(0);
+                    log::error!(
+                        "Memory fault: {:?} at 0x{:08x} (size={}) from EIP=0x{:08x}",
+                        mem_type,
+                        addr,
+                        size,
+                        eip
+                    );
+                    false // let Unicorn propagate the error
+                },
+            )
+            .map_err(|e| {
+                EmulationError::EmulationError(format!("Failed to add mem-fault hook: {:?}", e))
+            })?;
+
         debug!("Syscall hook setup");
         Ok(())
     }
