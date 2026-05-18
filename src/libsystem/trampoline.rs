@@ -11,6 +11,21 @@ pub const OPTIND_STORAGE_ADDR: u32 = 0x5000_F000;
 pub const OPTARG_STORAGE_ADDR: u32 = 0x5000_F004;
 pub const ERRNO_STORAGE_ADDR: u32 = 0x5000_F008;
 
+// Fake FILE* identity values for stdin/stdout/stderr.
+pub const STDIN_FILE_PTR: u32 = 0x5001_0000;
+pub const STDOUT_FILE_PTR: u32 = 0x5001_0004;
+pub const STDERR_FILE_PTR: u32 = 0x5001_0008;
+
+// Storage locations for __stdinp/__stdoutp/__stderrp globals.
+// The binary's __nl_symbol_ptr slot is patched to point here; reading the
+// slot gives the fake FILE* value above.
+pub const STDINP_STORAGE: u32 = 0x5001_F000;
+pub const STDOUTP_STORAGE: u32 = 0x5001_F004;
+pub const STDERRP_STORAGE: u32 = 0x5001_F008;
+
+// fdopen-created FILE* range: FILE* = FDOPEN_FILE_BASE + fd * 4 (fd 0..255).
+pub const FDOPEN_FILE_BASE: u32 = 0x5002_0000;
+
 pub struct Trampoline {
     pub dispatch: HashMap<u32, LibSym>,
     name_to_addr: HashMap<String, u32>,

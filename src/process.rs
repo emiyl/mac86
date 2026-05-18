@@ -243,6 +243,20 @@ impl Process {
             self.cpu
                 .write_memory(libsystem::OPTARG_STORAGE_ADDR, &0u32.to_le_bytes())?;
 
+            // Initialize __stdinp/__stdoutp/__stderrp storage with fake FILE* values.
+            self.cpu.write_memory(
+                libsystem::STDINP_STORAGE,
+                &libsystem::STDIN_FILE_PTR.to_le_bytes(),
+            )?;
+            self.cpu.write_memory(
+                libsystem::STDOUTP_STORAGE,
+                &libsystem::STDOUT_FILE_PTR.to_le_bytes(),
+            )?;
+            self.cpu.write_memory(
+                libsystem::STDERRP_STORAGE,
+                &libsystem::STDERR_FILE_PTR.to_le_bytes(),
+            )?;
+
             self.filesystem.borrow_mut().trampoline_map = sym_map;
 
             for (slot, taddr) in patches {
