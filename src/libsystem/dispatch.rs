@@ -37,15 +37,6 @@ pub fn handle_libcall(
     let a2 = read_u32(emu, esp + 12);
     let a3 = read_u32(emu, esp + 16);
 
-    log::debug!(
-        "[libsystem] {:?}({:#x}, {:#x}, {:#x}, {:#x})",
-        sym,
-        a0,
-        a1,
-        a2,
-        a3
-    );
-
     let outcome = dispatch(emu, fs, sym, a0, a1, a2, a3, esp, ret_addr);
 
     match outcome {
