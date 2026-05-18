@@ -237,6 +237,31 @@ impl VirtualFileSystem {
         })
     }
 
+    /// Duplicate a file descriptor (returns the new fd).
+    pub fn dup(&mut self, fd: u32) -> EmulationResult<u32> {
+        let desc = self
+            .file_descriptors
+            .get(&fd)
+            .ok_or_else(|| EmulationError::FileSystemError(format!("Invalid FD: {}", fd)))?
+            .clone();
+        let new_fd = self.next_fd;
+        self.next_fd += 1;
+        self.file_descriptors.insert(new_fd, desc);
+        Ok(new_fd)
+    }
+
+    /// Make `to` refer to the same file as `from` (dup2 semantics).
+    pub fn dup2(&mut self, from: u32, to: u32) -> EmulationResult<u32> {
+        let desc = self
+            .file_descriptors
+            .get(&from)
+            .ok_or_else(|| EmulationError::FileSystemError(format!("Invalid FD: {}", from)))?
+            .clone();
+        self.file_descriptors.remove(&to);
+        self.file_descriptors.insert(to, desc);
+        Ok(to)
+    }
+
     /// Close a file descriptor
     pub fn close(&mut self, fd: u32) -> EmulationResult<()> {
         self.file_descriptors

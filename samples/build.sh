@@ -21,25 +21,8 @@ mkdir -p "$BUILD_DIR"
 clang -arch i386 \
     -isysroot "$SDK_PATH" \
     -mmacosx-version-min=10.6 \
-    -c "$SAMPLES_DIR/crt0.s" \
-    -o "$BUILD_DIR/crt0.o"
-
-clang -arch i386 \
-    -isysroot "$SDK_PATH" \
-    -mmacosx-version-min=10.6 \
-    -ffreestanding \
-    -fno-stack-protector \
-    -fno-builtin \
-    -fno-asynchronous-unwind-tables \
-    -c "$SRC_PATH" \
-    -o "$BUILD_DIR/main.o"
-
-ld -arch i386 \
-    -macos_version_min 10.6 \
-    -static \
-    -e _start \
-    -o "$OUT_PATH" \
-    "$BUILD_DIR/crt0.o" "$BUILD_DIR/main.o"
+    "$SRC_PATH" \
+    -o "$OUT_PATH"
 
 echo "built: $OUT_PATH"
 file "$OUT_PATH"

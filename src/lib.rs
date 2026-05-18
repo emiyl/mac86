@@ -1,8 +1,10 @@
 pub mod binary_loader;
 pub mod cpu;
+pub mod dyld;
 pub mod emulator;
 pub mod errors;
 pub mod filesystem;
+pub mod libsystem;
 pub mod memory;
 pub mod process;
 pub mod syscall;

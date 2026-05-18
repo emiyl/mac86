@@ -3,6 +3,7 @@ use crate::cpu::CpuEmulator;
 use crate::emulator::{EmulationContext, TraceConfig};
 use crate::errors::EmulationResult;
 use crate::filesystem::VirtualFileSystem;
+use crate::libsystem;
 use crate::memory::MemoryManager;
 use crate::syscall::SyscallHandler;
 use log::info;
@@ -23,7 +24,6 @@ pub struct Process {
 }
 
 impl Process {
-    /// Create a new process from a binary
     pub fn new(binary: BinaryInfo, emulation_ctx: &mut EmulationContext) -> EmulationResult<Self> {
         emulation_ctx.initialize()?;
 
@@ -31,8 +31,7 @@ impl Process {
         let syscall_handler = SyscallHandler::new_with_trace(trace_config.syscalls);
 
         let mut cpu = CpuEmulator::new()?;
-
-        let total_size = 0x80000000u32; // 2GB virtual address space
+        let total_size = 0x80000000u32;
         cpu.map_memory(0x0, total_size)?;
 
         let memory_manager = MemoryManager::new(total_size as usize);
@@ -49,45 +48,33 @@ impl Process {
         })
     }
 
-    /// Load binary code and data into emulated memory
     fn load_binary_into_memory(&mut self) -> EmulationResult<()> {
         info!("Loading binary segments into memory");
 
         for segment in &self.binary.segments {
-            // Skip empty segments
             if segment.vsize == 0 {
                 continue;
             }
-
             info!(
-                "Loading segment: vaddr=0x{:x}, size=0x{:x}",
-                segment.vaddr, segment.vsize
+                "Loading segment '{}': vaddr=0x{:x} size=0x{:x}",
+                segment.name, segment.vaddr, segment.vsize
             );
 
-            // Create a zero-filled buffer for the segment
             let mut data = vec![0u8; segment.vsize as usize];
-
-            // If there's file data, copy it in from the original binary raw bytes
             if segment.filesize > 0 {
-                let copy_size = std::cmp::min(segment.filesize, segment.vsize) as usize;
-                if copy_size > 0 {
-                    let file_off = segment.fileoff as usize;
-                    let file_end = file_off + copy_size;
-                    if file_end <= self.binary.raw.len() {
-                        data[..copy_size].copy_from_slice(&self.binary.raw[file_off..file_end]);
-                    } else {
-                        // Fallback: if goblin reported odd file ranges, copy the whole file at segment base.
-                        let copy_len = std::cmp::min(self.binary.raw.len(), data.len());
-                        data[..copy_len].copy_from_slice(&self.binary.raw[..copy_len]);
-                    }
+                let copy_size = segment.filesize.min(segment.vsize) as usize;
+                let file_off = segment.fileoff as usize;
+                let file_end = file_off + copy_size;
+                if file_end <= self.binary.raw.len() {
+                    data[..copy_size].copy_from_slice(&self.binary.raw[file_off..file_end]);
+                } else {
+                    let copy_len = self.binary.raw.len().min(data.len());
+                    data[..copy_len].copy_from_slice(&self.binary.raw[..copy_len]);
                 }
             }
-
-            // Write segment into emulated memory
             self.cpu.write_memory(segment.vaddr, &data)?;
         }
 
-        // Write sections (actual file-backed data) into memory at their addresses
         for section in &self.binary.sections {
             if section.size > 0 && !section.data.is_empty() {
                 info!(
@@ -98,13 +85,12 @@ impl Process {
             }
         }
 
-        // Fallback for minimalist binaries with inconsistent segment metadata:
-        // if entry bytes are all zeros but raw file has data at that offset, patch it in.
+        // Fallback: if entry bytes are all zeros, patch from raw file.
         let entry = self.binary.entry_point as usize;
         if entry + 16 <= self.binary.raw.len() {
             let current = self.cpu.read_memory(self.binary.entry_point, 16)?;
             if current.iter().all(|b| *b == 0) {
-                let patch_len = std::cmp::min(256usize, self.binary.raw.len() - entry);
+                let patch_len = 256usize.min(self.binary.raw.len() - entry);
                 self.cpu.write_memory(
                     self.binary.entry_point,
                     &self.binary.raw[entry..entry + patch_len],
@@ -116,28 +102,26 @@ impl Process {
         Ok(())
     }
 
-    /// Setup the initial stack per the i386 SysV ABI.
+    /// Build the initial stack.
     ///
-    /// Layout at ESP on _start entry:
-    ///   [esp+0]  argc (u32)
-    ///   [esp+4]  argv  (char** → argv_array)
-    ///   [esp+8]  envp  (char** → envp_array, currently empty)
+    /// If `ret_addr` is `Some(addr)` the stack starts with that return address
+    /// (direct-to-main call convention for LC_MAIN binaries).  If `None`, the
+    /// stack starts directly with `argc` (crt0 will push the return address
+    /// itself via `call _main`).
     ///
-    /// argv_array lives at PTRARRAY_REGION:
-    ///   argv[0], argv[1], ..., NULL
-    ///   NULL  (envp sentinel immediately after)
+    /// Layout (`ret_addr = None`, crt0 convention):
+    ///   ESP → [argc, argv*, envp*]
     ///
-    /// String data lives at STR_REGION.
-    ///
-    /// After crt0's `call _main`, _main sees argc at [esp+4] and argv at [esp+8].
-    fn setup_stack(&mut self, args: &[String]) -> EmulationResult<u32> {
+    /// Layout (`ret_addr = Some(x)`, direct-to-main):
+    ///   ESP → [x (fake ret), argc, argv*, envp*]
+    fn setup_stack(&mut self, args: &[String], ret_addr: Option<u32>) -> EmulationResult<u32> {
         const STR_REGION: u32 = 0x7FFE0000;
         const PTRARRAY_REGION: u32 = 0x7FFD0000;
         const STACK_TOP: u32 = 0x7FFC0000;
 
         let argc = args.len() as u32;
 
-        // 1. Write null-terminated argument strings.
+        // Write null-terminated argument strings.
         let mut str_ptr = STR_REGION;
         let mut argv_ptrs: Vec<u32> = Vec::with_capacity(args.len());
         for arg in args {
@@ -148,62 +132,107 @@ impl Process {
             str_ptr += bytes.len() as u32;
         }
 
-        // 2. Write argv pointer array followed by argv NULL then envp NULL.
+        // Write argv pointer array then envp null sentinel.
         let mut arr_ptr = PTRARRAY_REGION;
         for &p in &argv_ptrs {
             self.cpu.write_memory(arr_ptr, &p.to_le_bytes())?;
             arr_ptr += 4;
         }
-        self.cpu.write_memory(arr_ptr, &0u32.to_le_bytes())?; // argv NULL sentinel
+        self.cpu.write_memory(arr_ptr, &0u32.to_le_bytes())?; // argv null
         arr_ptr += 4;
         let envp_array_addr = arr_ptr;
-        self.cpu.write_memory(arr_ptr, &0u32.to_le_bytes())?; // envp NULL sentinel
+        self.cpu.write_memory(arr_ptr, &0u32.to_le_bytes())?; // envp null
 
-        // 3. Write [argc, argv**, envp**] at the stack top, 16-byte aligned.
-        let mut esp = STACK_TOP - 12;
-        esp &= !0xF;
-        self.cpu.write_memory(esp, &argc.to_le_bytes())?;
-        self.cpu.write_memory(esp + 4, &PTRARRAY_REGION.to_le_bytes())?;
-        self.cpu.write_memory(esp + 8, &envp_array_addr.to_le_bytes())?;
+        // Build the frame; align ESP to 16 bytes.
+        let frame_words: u32 = if ret_addr.is_some() { 4 } else { 3 };
+        let esp = (STACK_TOP - frame_words * 4) & !0xF;
+
+        let mut ptr = esp;
+        if let Some(ra) = ret_addr {
+            self.cpu.write_memory(ptr, &ra.to_le_bytes())?;
+            ptr += 4;
+        }
+        self.cpu.write_memory(ptr, &argc.to_le_bytes())?;
+        ptr += 4;
+        self.cpu.write_memory(ptr, &PTRARRAY_REGION.to_le_bytes())?;
+        ptr += 4;
+        self.cpu.write_memory(ptr, &envp_array_addr.to_le_bytes())?;
 
         info!("Stack setup complete: ESP=0x{:x}", esp);
         Ok(esp)
     }
 
-    /// Execute the process with given arguments
     pub fn execute(&mut self, args: &[String]) -> EmulationResult<()> {
         info!(
-            "Executing process: {} (entry: 0x{:x})",
-            self.binary.name, self.binary.entry_point
+            "Executing {} (entry: 0x{:x}, is_main={}, dynamic={})",
+            self.binary.name,
+            self.binary.entry_point,
+            self.binary.entry_is_main,
+            self.binary.is_dynamic,
         );
-        info!("Arguments: {:?}", args);
 
-        // Load binary into memory
         self.load_binary_into_memory()?;
 
-        // Setup syscall hook and optional instruction trace
+        // ── INT 0x80 / instruction-trace hooks ───────────────────────────────
         self.cpu.setup_syscall_hook(
             self.syscall_handler,
             Rc::clone(&self.filesystem),
             self.trace_config.instructions,
         )?;
 
-        // Setup stack with arguments
-        let stack_ptr = self.setup_stack(args)?;
+        // ── libSystem trampoline (dynamic binaries) ───────────────────────────
+        let direct_ret_addr: Option<u32> = if let Some(ref bindings) = self.binary.dyld_bindings {
+            let trampoline = libsystem::Trampoline::build(bindings);
 
-        // Initialize CPU state; EBP=0 marks the outermost frame per the ABI.
+            // Collect (ptr_slot_addr, trampoline_addr) patches before any borrows.
+            let patches: Vec<(u32, u32)> = bindings
+                .imports
+                .iter()
+                .filter_map(|imp| {
+                    trampoline
+                        .addr_for_binding(&imp.name)
+                        .map(|ta| (imp.ptr_addr, ta))
+                })
+                .collect();
+
+            let exit_addr = trampoline.exit_addr();
+
+            // Install trampoline hook.
+            self.cpu
+                .setup_trampoline_hook(Rc::clone(&self.filesystem), trampoline)?;
+
+            // Fill pointer slots in guest memory.
+            for (slot, taddr) in patches {
+                info!(
+                    "  binding slot 0x{:x} → trampoline 0x{:x}",
+                    slot, taddr
+                );
+                let _ = self.cpu.write_memory(slot, &taddr.to_le_bytes());
+            }
+
+            if self.binary.entry_is_main {
+                Some(exit_addr)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        // ── stack ─────────────────────────────────────────────────────────────
+        let stack_ptr = self.setup_stack(args, direct_ret_addr)?;
+
+        // ── CPU start ─────────────────────────────────────────────────────────
         self.cpu
             .init_cpu_state(self.binary.entry_point, stack_ptr)?;
 
-        // Dump initial CPU state for debugging
         let cpu_state = self.cpu.dump_registers()?;
         info!("Initial CPU state: {}", cpu_state);
 
-        // Execute the binary
         info!("Starting emulation");
         self.cpu.execute(0)?;
 
-        info!("Process completed successfully");
+        info!("Process completed");
         let final_state = self.cpu.dump_registers()?;
         info!("Final CPU state: {}", final_state);
         Ok(())

@@ -1,5 +1,6 @@
 use crate::errors::{EmulationError, EmulationResult};
 use crate::filesystem::VirtualFileSystem;
+use crate::libsystem::{handle_libcall, LibCallOutcome, Trampoline};
 use crate::syscall::SyscallHandler;
 use crate::syscall::{SyscallArgs, SyscallOutcome};
 use log::{debug, info};
@@ -156,6 +157,42 @@ impl CpuEmulator {
         }
 
         debug!("Syscall hook setup");
+        Ok(())
+    }
+
+    /// Register a code hook that intercepts calls into the libSystem trampoline
+    /// region and dispatches them to the Rust handler implementations.
+    pub fn setup_trampoline_hook(
+        &mut self,
+        fs: Rc<RefCell<VirtualFileSystem>>,
+        trampoline: Trampoline,
+    ) -> EmulationResult<()> {
+        let end = trampoline.region_end();
+        let slot_count = trampoline.slot_count;
+        let dispatch = trampoline.dispatch;
+
+        self.emu
+            .add_code_hook(
+                crate::libsystem::TRAMPOLINE_BASE as u64,
+                end as u64,
+                move |emu: &mut Unicorn<'_, ()>, addr: u64, _size: u32| {
+                    let Some(sym) = dispatch.get(&(addr as u32)).copied() else {
+                        return;
+                    };
+                    let outcome = {
+                        let mut fs_guard = fs.borrow_mut();
+                        handle_libcall(emu, &mut fs_guard, sym)
+                    };
+                    if matches!(outcome, LibCallOutcome::Exit) {
+                        let _ = emu.emu_stop();
+                    }
+                },
+            )
+            .map_err(|e| {
+                EmulationError::EmulationError(format!("Failed to add trampoline hook: {:?}", e))
+            })?;
+
+        debug!("Trampoline hook setup ({} slots)", slot_count);
         Ok(())
     }
 
