@@ -6,6 +6,7 @@ use crate::errors::EmulationResult;
 use crate::filesystem::VirtualFileSystem;
 use crate::libsystem;
 use crate::syscall::SyscallHandler;
+use log::debug;
 use log::info;
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -223,19 +224,9 @@ impl Process {
             // Build dlsym lookup map and store it in the VFS before borrowing.
             let sym_map = trampoline.symbol_map();
 
-            let patches: Vec<(u32, u32)> = bindings
-                .imports
-                .iter()
-                .filter_map(|imp| {
-                    trampoline
-                        .addr_for_binding(&imp.name)
-                        .map(|ta| (imp.ptr_addr, ta))
-                })
-                .collect();
-
             let exit_addr = trampoline.exit_addr();
             self.cpu
-                .setup_trampoline_hook(Rc::clone(&self.filesystem), trampoline)?;
+                .setup_trampoline_hook(Rc::clone(&self.filesystem), &trampoline)?;
 
             // Initialize common libSystem globals used by BSD getopt.
             self.cpu
@@ -257,11 +248,28 @@ impl Process {
                 &libsystem::STDERR_FILE_PTR.to_le_bytes(),
             )?;
 
+            // Seed data symbols used by libc parsing and stack canaries.
+            self.cpu
+                .write_memory(libsystem::STACK_CHK_GUARD_ADDR, &0u32.to_le_bytes())?;
+
+            let mut rune_locale = vec![0u8; 0x1000];
+            for ch in b'0'..=b'9' {
+                let off = 0x34 + (ch as usize) * 4;
+                rune_locale[off..off + 4].copy_from_slice(&0x0000_0400u32.to_le_bytes());
+            }
+            self.cpu
+                .write_memory(libsystem::DEFAULT_RUNE_LOCALE_ADDR, &rune_locale)?;
+
             self.filesystem.borrow_mut().trampoline_map = sym_map;
 
-            for (slot, taddr) in patches {
-                info!("  binding 0x{:x} → trampoline 0x{:x}", slot, taddr);
-                let _ = self.cpu.write_memory(slot, &taddr.to_le_bytes());
+            for imp in &bindings.imports {
+                if let Some(taddr) = trampoline.addr_for_binding(&imp.name) {
+                    info!(
+                        "  binding 0x{:x} ({}) → trampoline 0x{:x}",
+                        imp.ptr_addr, imp.name, taddr
+                    );
+                    let _ = self.cpu.write_memory(imp.ptr_addr, &taddr.to_le_bytes());
+                }
             }
 
             if self.binary.entry_is_main {
@@ -275,6 +283,42 @@ impl Process {
 
         // ── stack ─────────────────────────────────────────────────────────────
         let stack_ptr = self.setup_stack(&args, direct_ret_addr)?;
+
+        {
+            use std::convert::TryInto;
+            if let Ok(buf) = self.cpu.read_memory(stack_ptr, 4) {
+                if buf.len() >= 4 {
+                    let argc = u32::from_le_bytes(buf[0..4].try_into().unwrap_or([0; 4]));
+                    info!("Guest argc = {}", argc);
+                    let mut v_argv: Vec<String> = Vec::new();
+                    for i in 0..argc as usize {
+                        let ptr_addr = stack_ptr + 4 + (i as u32) * 4;
+                        if let Ok(pbuf) = self.cpu.read_memory(ptr_addr, 4) {
+                            if pbuf.len() < 4 {
+                                continue;
+                            }
+                            let argp = u32::from_le_bytes(pbuf[0..4].try_into().unwrap_or([0; 4]));
+                            if argp == 0 {
+                                info!("argv[{}] = (null)", i);
+                                continue;
+                            }
+                            // read up to 256 bytes for the arg string
+                            if let Ok(sbuf) = self.cpu.read_memory(argp, 256) {
+                                let terminator =
+                                    sbuf.iter().position(|&b| b == 0).unwrap_or(sbuf.len());
+                                if let Ok(s) = std::str::from_utf8(&sbuf[..terminator]) {
+                                    info!("argv[{}] = {} (0x{:x})", i, s, argp);
+                                    v_argv.push(s.to_string());
+                                } else {
+                                    info!("argv[{}] = <non-utf8> (0x{:x})", i, argp);
+                                }
+                            }
+                        }
+                    }
+                    // Completed argv dump.
+                }
+            }
+        }
 
         // ── CPU start ─────────────────────────────────────────────────────────
         self.cpu

@@ -1232,6 +1232,46 @@ fn dispatch(
             DispatchOutcome::Ret(0)
         }
 
+        // ── Sleep ────────────────────────────────────────────────────────────
+        LibSym::Sleep => {
+            let secs = a0 as u64;
+            if secs > 0 {
+                std::thread::sleep(std::time::Duration::from_secs(secs));
+            }
+            DispatchOutcome::Ret(0)
+        }
+        LibSym::Nanosleep => {
+            let req_ptr = a0;
+            if req_ptr != 0 {
+                let sec = read_u32(emu, req_ptr) as u64;
+                let nsec = read_u32(emu, req_ptr + 4) as u64;
+                let total_ms = sec.saturating_mul(1000).saturating_add(nsec / 1_000_000);
+                if total_ms > 0 {
+                    std::thread::sleep(std::time::Duration::from_millis(total_ms));
+                }
+            }
+            DispatchOutcome::Ret(0)
+        }
+
+        // Simple implementation for the legacy ___maskrune helper.  Many
+        // binaries call this with a character and a class mask (e.g. 0x4000
+        // for digit).  Implement only the digit mask used by coreutils so
+        // that parsing helpers like `isdigit` behave correctly.
+        LibSym::MaskRune => {
+            let ch = a0 as u8 as char;
+            let mask = a1;
+            // 0x4000 is the digit class in the platform's mask definitions.
+            if (mask & 0x4000) != 0 {
+                if ch.is_ascii_digit() {
+                    DispatchOutcome::Ret(1)
+                } else {
+                    DispatchOutcome::Ret(0)
+                }
+            } else {
+                DispatchOutcome::Ret(0)
+            }
+        }
+
         LibSym::Stub0 => DispatchOutcome::Ret(0),
     }
 }

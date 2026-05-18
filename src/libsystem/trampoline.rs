@@ -10,6 +10,8 @@ pub const SIGNAL_RETURN_ADDR: u32 = TRAMPOLINE_BASE + 8;
 pub const OPTIND_STORAGE_ADDR: u32 = 0x5000_F000;
 pub const OPTARG_STORAGE_ADDR: u32 = 0x5000_F004;
 pub const ERRNO_STORAGE_ADDR: u32 = 0x5000_F008;
+pub const STACK_CHK_GUARD_ADDR: u32 = 0x5003_0000;
+pub const DEFAULT_RUNE_LOCALE_ADDR: u32 = 0x5003_1000;
 
 // Fake FILE* identity values for stdin/stdout/stderr.
 pub const STDIN_FILE_PTR: u32 = 0x5001_0000;
@@ -63,6 +65,9 @@ impl Trampoline {
                 a
             });
             name_to_addr.insert(imp.name.clone(), addr);
+        }
+        for (name, &addr) in name_to_addr.iter() {
+            log::debug!("trampoline mapping: {:?} -> 0x{:x}", name, addr);
         }
         Trampoline {
             dispatch,

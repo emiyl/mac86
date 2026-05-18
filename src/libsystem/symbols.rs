@@ -85,6 +85,7 @@ pub enum LibSym {
     Atof,
     // char classification / conversion
     Isdigit,
+    MaskRune,
     Isalpha,
     Isalnum,
     Isspace,
@@ -198,6 +199,9 @@ pub enum LibSym {
     // Internal sentinels
     ThreadSentinel,
     SignalReturn,
+    // Sleep
+    Sleep,
+    Nanosleep,
     // Silent no-ops
     Stub0,
 }
@@ -285,6 +289,7 @@ pub fn known_symbol(name: &str) -> Option<LibSym> {
         "strtod" => Some(LibSym::Strtod),
         "atof" => Some(LibSym::Atof),
         "isdigit" | "isdigit_l" => Some(LibSym::Isdigit),
+        "maskrune" => Some(LibSym::MaskRune),
         "isalpha" | "isalpha_l" => Some(LibSym::Isalpha),
         "isalnum" | "isalnum_l" => Some(LibSym::Isalnum),
         "isspace" | "isspace_l" => Some(LibSym::Isspace),
@@ -390,6 +395,9 @@ pub fn known_symbol(name: &str) -> Option<LibSym> {
         "objc_getClass" => Some(LibSym::ObjcGetClass),
         "objc_lookUpClass" => Some(LibSym::ObjcLookUpClass),
         "NSLog" => Some(LibSym::NSLog),
+        // Sleep
+        "sleep" => Some(LibSym::Sleep),
+        "nanosleep" => Some(LibSym::Nanosleep),
         // no-op stubs
         "atexit"
         | "__cxa_atexit"
@@ -416,6 +424,8 @@ pub fn known_data_symbol(name: &str) -> Option<u32> {
     match base_name(name) {
         "optind" => Some(0x5000_F000),
         "optarg" => Some(0x5000_F004),
+        "___stack_chk_guard" | "__stack_chk_guard" | "stack_chk_guard" => Some(0x5003_0000),
+        "__DefaultRuneLocale" | "DefaultRuneLocale" => Some(0x5003_1000),
         // stdio FILE* globals — slots point to storage holding the fake FILE* value.
         // base_name strips ALL leading underscores, so ___stdoutp → "stdoutp".
         "stdinp" => Some(0x5001_F000),
