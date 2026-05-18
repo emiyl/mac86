@@ -1,0 +1,10 @@
+;
+; Configuration file of IPADIC
+;
+; $Id: dicrc,v 1.12 2009/06/26 19:17:23 guo1 Exp $;
+;
+
+cost-factor = 800
+bos-feature = BOS/EOS,*,*,*,*
+eval-size = 3
+unk-eval-size = 2

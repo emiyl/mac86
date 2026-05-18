@@ -1,0 +1,30 @@
+(version 1)
+
+(deny default)
+
+(allow file-read*
+       (subpath "/System/Library/Frameworks/ApplicationServices.framework"))
+
+(allow file-read-metadata
+       (literal "/")
+       (literal "/Library/Preferences/.GlobalPreferences.plist")
+       (literal "/etc")
+       (literal "/private/var/root")
+       (literal "/private/var/root/Library/Preferences/.GlobalPreferences.plist")
+       (literal "/var")
+       (subpath "/System"))
+
+(allow file-write*
+       (subpath "/System/Library/Fonts"))
+
+(allow ipc-posix-shm)
+
+(allow mach-lookup
+       (global-name "com.apple.CoreServices.coreservicesd")
+       (global-name "com.apple.FontObjectsServer")
+       (global-name "com.apple.FontServer")
+       (global-name "com.apple.distributed_notifications.2")
+       (global-name "com.apple.system.notification_center")
+       (global-name "com.apple.windowserver.session"))
+
+(allow sysctl-read)

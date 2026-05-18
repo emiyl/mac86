@@ -1,0 +1,89 @@
+(version 1)
+
+; WARNING: The sandbox rule capabilities and syntax used in this file are currently an
+; Apple SPI (System Private Interface) and are subject to change at any time without notice.
+; Apple may in future announce an official public supported sandbox API, but until then Developers
+; are cautioned not to build products that use or depend on the sandbox facilities illustrated here.
+
+; Use "debug all" to log all operations examined by seatbelt, whether allowed or not.
+; Use "debug deny" to log only operations that are denied by seatbelt
+; to discover what specific attempted operation is causing an exception.
+
+;(debug all)
+(debug deny)
+
+; To help debugging, "with send-signal SIGFPE" will trigger a fake floating-point exception,
+; which will crash the process and show the call stack leading to the offending operation.
+; For the shipping version "deny" is probably better because it vetoes the operation
+; without killing the process.
+
+(deny default)
+;(deny default (with send-signal SIGFPE))
+
+; Special exception: "send-signal" command does not apply to the mach-* operations,
+; so for those we have to use a plain unadorned "deny" instead
+; (which means we may not get any notification of unintentional mach-* denials)
+(deny mach-lookup)
+(deny mach-priv-host-port)
+
+; Mach communications
+; These are needed for things like getpwnam, hostname changes, & keychain
+(allow mach-lookup (global-name
+					"com.apple.bsd.dirhelper"
+					"com.apple.distributed_notifications.2"
+					"com.apple.ocspd"
+					"com.apple.PowerManagement.control"
+					"com.apple.mDNSResponderHelper"
+					"com.apple.SecurityServer"
+					"com.apple.SystemConfiguration.configd"
+					"com.apple.system.DirectoryService.libinfo_v1"
+					"com.apple.system.DirectoryService.membership_v1"
+					"com.apple.system.notification_center"
+					"com.apple.system.logger"))
+
+; Rules to allow the operations mDNSResponder needs start here
+
+(allow signal (target self))
+(allow network*)			; Allow networking, including Unix Domain Sockets
+(if (defined? 'system-socket)
+    (allow system-socket))  ; To create raw sockets
+(allow sysctl-read)			; To get hardware model information
+(allow file-read-metadata)	; Needed for dyld to work
+(allow ipc-posix-shm)		; Needed for POSIX shared memory
+
+(allow file-read-data                 (regex #"^/dev/random$"))
+(allow file-read-data file-write-data (regex #"^/dev/console$"))		; Needed for syslog early in the boot process
+(allow file-read-data                 (regex #"^/dev/autofs_nowait$"))	; Used by CF to circumvent automount triggers
+
+; Allow us to read and write our socket
+(allow file-read*     file-write*     (regex #"^/private/var/run/mDNSResponder$"))
+
+; Allow us to read system version, settings, and other miscellaneous necessary file system accesses
+(allow file-read-data                 (regex #"^/dev/urandom$"))
+(allow file-read-data                 (regex #"^/usr/sbin(/mDNSResponder)?$"))		; Needed for CFCopyVersionDictionary()
+(allow file-read-data                 (regex #"^/usr/share/icu/.*$"))
+(allow file-read-data                 (regex #"^/usr/share/zoneinfo/.*$"))
+(allow file-read-data                 (regex #"^/Library/Preferences/SystemConfiguration/preferences\.plist$"))
+(allow file-read-data                 (regex #"^/Library/Preferences/SystemConfiguration/com\.apple\.nat\.plist$"))
+(allow file-read-data                 (regex #"^/Library/Preferences/(ByHost/)?\.GlobalPreferences.*\.plist$"))
+(allow file-read-data                 (regex #"^/Library/Preferences/com\.apple\.security.*\.plist$"))
+(allow file-read-data                 (regex #"^/Library/Preferences/com\.apple\.crypto\.plist$"))
+(allow file-read-data                 (regex #"^/Library/Security/Trust Settings/Admin\.plist$"))
+(allow file-read-data                 (regex #"^/System/Library/CoreServices/SystemVersion.*$"))
+(allow file-read-data                 (regex #"^/System/Library/Preferences/com\.apple\.security.*\.plist$"))
+(allow file-read-data                 (regex #"^/System/Library/Preferences/com\.apple\.crypto\.plist$"))
+(allow file-read-data                 (regex #"^/System/Library/SystemConfiguration/PowerManagement\.bundle(/|$)"))
+(allow file-read-data                 (regex #"^/Library/Preferences/SystemConfiguration/com\.apple\.PowerManagement\.plist$"))
+
+; Allow access to System Keychain
+(allow file-read-data                 (regex #"^/System/Library/Security$"))
+(allow file-read-data                 (regex #"^/System/Library/Keychains/.*$"))
+(allow file-read-data                 (regex #"^/Library/Keychains/System\.keychain$"))
+; Our Module Directory Services cache
+(allow file-read-data                 (regex #"^/private/var/tmp/mds/"))
+(allow file-read* file-write*         (regex #"^/private/var/tmp/mds/[0-9]+(/|$)"))
+(allow file-read-data                 (regex #"^/private/var/db/mds/"))
+(allow file-read* file-write*         (regex #"^/private/var/db/mds/[0-9]+(/|$)"))
+(allow file-read* file-write*         (regex #"^/private/var/folders/[^/]+/[^/]+/-Caches-/mds(/|$)"))
+; CRL Cache for SSL/TLS connections
+(allow file-read-data                 (regex #"^/private/var/db/crls/crlcache\.db$"))

@@ -1,0 +1,28 @@
+(version 1)
+
+(deny default)
+(debug deny)
+
+(allow mach-lookup
+	(global-name "com.apple.system.DirectoryService.libinfo_v1")
+	(global-name "com.apple.system.DirectoryService.membership_v1")
+	(global-name "com.apple.system.notification_center")
+	(global-name "com.apple.system.logger"))
+
+(allow file-ioctl
+       (literal "/dev/dtracehelper"))
+
+(allow file-read-data)
+(allow file-read-metadata)
+
+(allow file-write-data
+       (literal "/dev/dtracehelper"))
+
+(allow process-exec
+       (subpath "/System"))
+
+(allow sysctl-read)
+; For syslog
+(allow ipc-posix-shm)
+
+(allow signal (target self))
