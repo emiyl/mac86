@@ -103,7 +103,10 @@ fn dispatch(
             let path = read_cstr(emu, a0);
             match fs.open(path::Path::new(&path), (a1 & 0x3) != 0) {
                 Ok(fd) => DispatchOutcome::Ret(fd as u64),
-                Err(_) => DispatchOutcome::Ret(u32::MAX as u64),
+                Err(_) => {
+                    write_u32(emu, ERRNO_STORAGE_ADDR, 2); // ENOENT
+                    DispatchOutcome::Ret(u32::MAX as u64)
+                }
             }
         }
         LibSym::Close => {
@@ -156,7 +159,10 @@ fn dispatch(
                     let _ = emu.mem_write(stat_ptr as u64, &buf);
                     DispatchOutcome::Ret(0)
                 }
-                Err(_) => DispatchOutcome::Ret(u32::MAX as u64),
+                Err(_) => {
+                    write_u32(emu, ERRNO_STORAGE_ADDR, 2); // ENOENT
+                    DispatchOutcome::Ret(u32::MAX as u64)
+                }
             }
         }
         LibSym::Lstat => {
@@ -170,7 +176,10 @@ fn dispatch(
                     let _ = emu.mem_write(stat_ptr as u64, &buf);
                     DispatchOutcome::Ret(0)
                 }
-                Err(_) => DispatchOutcome::Ret(u32::MAX as u64),
+                Err(_) => {
+                    write_u32(emu, ERRNO_STORAGE_ADDR, 2); // ENOENT
+                    DispatchOutcome::Ret(u32::MAX as u64)
+                }
             }
         }
         LibSym::Fcopyfile => {
@@ -482,6 +491,40 @@ fn dispatch(
             b.push(0);
             let _ = emu.mem_write(a0 as u64, &b);
             DispatchOutcome::Ret(a0 as u64)
+        }
+        LibSym::Strncat => {
+            let n = a2 as usize;
+            let mut b = read_cstr(emu, a0).into_bytes();
+            let src = read_cstr_max(emu, a1, n);
+            b.extend_from_slice(&src.as_bytes()[..src.len().min(n)]);
+            b.push(0);
+            let _ = emu.mem_write(a0 as u64, &b);
+            DispatchOutcome::Ret(a0 as u64)
+        }
+        LibSym::Strlcpy => {
+            let src = read_cstr(emu, a1);
+            let dstsize = a2 as usize;
+            if dstsize > 0 {
+                let copy_len = src.len().min(dstsize - 1);
+                let mut b = src.as_bytes()[..copy_len].to_vec();
+                b.push(0);
+                let _ = emu.mem_write(a0 as u64, &b);
+            }
+            DispatchOutcome::Ret(src.len() as u64)
+        }
+        LibSym::Strlcat => {
+            let dst = read_cstr(emu, a0);
+            let src = read_cstr(emu, a1);
+            let dstsize = a2 as usize;
+            let dst_len = dst.len();
+            if dstsize > dst_len + 1 {
+                let space = dstsize - dst_len - 1;
+                let copy_len = src.len().min(space);
+                let mut b = src.as_bytes()[..copy_len].to_vec();
+                b.push(0);
+                let _ = emu.mem_write((a0 + dst_len as u32) as u64, &b);
+            }
+            DispatchOutcome::Ret((dst_len + src.len()) as u64)
         }
         LibSym::Strchr => {
             let s = read_cstr(emu, a0);
