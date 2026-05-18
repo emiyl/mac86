@@ -4,7 +4,7 @@ use unicorn_engine::{RegisterX86, Unicorn};
 use crate::filesystem::VirtualFileSystem;
 use crate::threads::ThreadContinuation;
 
-use super::fts::{allocate_fts_handle, close_fts_handle, with_fts_handle};
+use super::fts::{allocate_fts_handle, close_fts_handle, with_fts_handle, FTS_SKIP};
 use super::math::{read_f32, read_f64, write_f64_st0};
 use super::mem::{read_bytes, read_cstr, read_cstr_max, read_u32, write_u32};
 use super::printf::{fmt_printf, fmt_printf_str, format_str};
@@ -59,6 +59,128 @@ pub fn handle_libcall(
         DispatchOutcome::Exit => LibCallOutcome::Exit,
         DispatchOutcome::StateSet => LibCallOutcome::Continue,
     }
+}
+
+/// Write one FTSENT struct (INODE64 layout) into emulation memory and return
+/// a Ret(ftsent_ptr) outcome.  When `link_ptr` is non-zero it is written into
+/// the fts_link field (offset 8) so callers can chain entries.
+///
+/// Memory layout inside the allocated block:
+///   [0..66]                  FTSENT struct
+///   [66 .. 66+name+1]        fts_name  (basename, null-terminated)
+///   [66+name+1 .. +path+1]   full host path (fts_accpath / fts_path point here)
+///   [remainder]              stat struct (120 bytes)
+fn write_ftsent(
+    emu: &mut Unicorn<'_, ()>,
+    fs: &mut VirtualFileSystem,
+    handle_id: u32,
+    entry_path: &std::path::Path,
+    fts_info: u32,
+    level: u16,
+    idx: usize,
+    link_ptr: u32,
+    fresh_alloc: bool, // true = mmap_anon (fts_children), false = reuse per-handle slot (fts_read)
+) -> DispatchOutcome {
+    let full_path = entry_path.to_string_lossy();
+    let basename = entry_path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| full_path.to_string());
+    let full_str = full_path.as_ref();
+
+    let name_len = basename.len();
+    let path_len = full_str.len();
+    // 68 (struct base) + name+1 + path+1 + 120 (stat), rounded to 16-byte multiple
+    let total = (68 + name_len + 1 + path_len + 1 + 120 + 15) & !15;
+
+    // For fts_read we reuse a fixed per-handle slot; for fts_children each entry
+    // gets its own mmap_anon allocation so the linked list stays valid.
+    let ftsent_ptr = if !fresh_alloc {
+        // fts_read path: reuse fixed slot (0x5fff0000 + handle_id * 4096)
+        0x5fff0000u32 + (handle_id as u32 * 4096)
+    } else {
+        // fts_children path: fresh allocation per entry
+        match fs.mmap_anon(total as u32) {
+            Ok(p) => p,
+            Err(_) => return DispatchOutcome::Ret(0),
+        }
+    };
+    // Ensure slot is big enough (if reusing fixed slot, 4096 bytes are available)
+    debug_assert!(total <= 4096);
+
+    // INODE64 FTSENT layout (32-bit macOS, confirmed by tracing fts_name address):
+    //   0-19:  fts_cycle, fts_parent, fts_link, fts_number, fts_pointer (5×4)
+    //  20-27:  fts_accpath, fts_path  (2×4 char*)
+    //  28-35:  fts_errno, fts_symfd  (2×4)
+    //  36-37:  fts_pathlen  (u16)
+    //  38-39:  fts_namelen  (u16)
+    //  40-47:  fts_ino      (u64, INODE64 64-bit inode)
+    //  48-51:  fts_dev      (u32)
+    //  52-53:  fts_nlink    (u16 — nlink_t is uint16_t on 32-bit macOS)
+    //  54-55:  fts_level    (i16)
+    //  56-57:  fts_info     (u16)  ← confirmed: mbrtowc arg = ftsent + 68 = fts_name
+    //  58-59:  fts_flags    (u16)
+    //  60-61:  fts_instr    (u16)
+    //  62-63:  [2-byte padding to align fts_statp to 4 bytes]
+    //  64-67:  fts_statp    (pointer)
+    //  68+:    fts_name     (inline char[], null-terminated)
+    let name_offset: u32 = 68;
+    let path_offset: u32 = name_offset + name_len as u32 + 1;
+    let stat_offset: u32 = path_offset + path_len as u32 + 1;
+
+    let _name_ptr = ftsent_ptr + name_offset;
+    let path_ptr = ftsent_ptr + path_offset;
+    let stat_ptr = ftsent_ptr + stat_offset;
+
+    let mut buf = vec![0u8; total];
+
+    // fts_link (offset 8)
+    buf[8..12].copy_from_slice(&link_ptr.to_le_bytes());
+
+    // fts_accpath / fts_path (offsets 20, 24) — point to full host path
+    buf[20..24].copy_from_slice(&path_ptr.to_le_bytes());
+    buf[24..28].copy_from_slice(&path_ptr.to_le_bytes());
+
+    // fts_pathlen (36), fts_namelen (38)
+    buf[36..38].copy_from_slice(&(path_len as u16).to_le_bytes());
+    buf[38..40].copy_from_slice(&(name_len as u16).to_le_bytes());
+
+    // fts_ino (40)
+    buf[40..48].copy_from_slice(&(idx as u64).to_le_bytes());
+
+    // fts_nlink (52) — uint16_t
+    buf[52..54].copy_from_slice(&1u16.to_le_bytes());
+
+    // fts_level (54)
+    buf[54..56].copy_from_slice(&(level as i16).to_le_bytes());
+
+    // fts_info (56)
+    buf[56..58].copy_from_slice(&(fts_info as u16).to_le_bytes());
+
+    // fts_statp (64) — offsets 62-63 are padding, stay zero
+    buf[64..68].copy_from_slice(&stat_ptr.to_le_bytes());
+
+    // fts_name inline at offset 68
+    buf[name_offset as usize..name_offset as usize + name_len].copy_from_slice(basename.as_bytes());
+
+    // full path string
+    buf[path_offset as usize..path_offset as usize + path_len].copy_from_slice(full_str.as_bytes());
+
+    // stat struct
+    use std::os::unix::fs::MetadataExt;
+    if let Ok(meta) = std::fs::metadata(entry_path) {
+        let fst = crate::filesystem::FileStat {
+            size: meta.len(),
+            is_file: meta.is_file(),
+            is_dir: meta.is_dir(),
+            ino: meta.ino(),
+        };
+        let stat_start = stat_offset as usize;
+        crate::filesystem::encode_stat_i386(&fst, &mut buf[stat_start..stat_start + 120]);
+    }
+
+    let _ = emu.mem_write(ftsent_ptr as u64, &buf);
+    DispatchOutcome::Ret(ftsent_ptr as u64)
 }
 
 fn file_ptr_to_fd(file_ptr: u32) -> u32 {
@@ -275,73 +397,7 @@ fn dispatch(
             match entry {
                 None => DispatchOutcome::Ret(0),
                 Some((entry_path, fts_info, level, idx)) => {
-                    let full_path = entry_path.to_string_lossy().to_string();
-
-                    // Allocate and populate a stat struct for fts_statp so the binary
-                    // can read st_mode and other fields from the source file.
-                    let stat_ptr = fs.mmap_anon(120).unwrap_or(0);
-                    if stat_ptr != 0 {
-                        use std::os::unix::fs::MetadataExt;
-                        if let Ok(meta) = std::fs::metadata(&entry_path) {
-                            let fst = crate::filesystem::FileStat {
-                                size: meta.len(),
-                                is_file: meta.is_file(),
-                                is_dir: meta.is_dir(),
-                                ino: meta.ino(),
-                            };
-                            let mut stat_buf = vec![0u8; 120];
-                            crate::filesystem::encode_stat_i386(&fst, &mut stat_buf);
-                            let _ = emu.mem_write(stat_ptr as u64, &stat_buf);
-                        }
-                    }
-
-                    // Allocate FTSENT at a fixed location: 0x5fff0000 base
-                    let ftsent_ptr = 0x5fff0000u32 + (handle_id as u32 * 4096) + (idx as u32 * 128);
-
-                    let mut ftsent = vec![0u8; 66 + full_path.len() + 1];
-
-                    // fts_cycle, fts_parent, fts_link, fts_number, fts_pointer
-                    ftsent[0..20].fill(0);
-
-                    // fts_accpath / fts_path — pointer to the inline filename string
-                    let name_ptr = ftsent_ptr + 66;
-                    ftsent[20..24].copy_from_slice(&name_ptr.to_le_bytes());
-                    ftsent[24..28].copy_from_slice(&name_ptr.to_le_bytes());
-
-                    // fts_errno, fts_symfd
-                    ftsent[28..36].fill(0);
-
-                    // fts_pathlen, fts_namelen
-                    ftsent[36..38].copy_from_slice(&(full_path.len() as u16).to_le_bytes());
-                    ftsent[38..40].copy_from_slice(&(full_path.len() as u16).to_le_bytes());
-
-                    // fts_ino (8 bytes, INODE64)
-                    ftsent[40..48].copy_from_slice(&(idx as u64).to_le_bytes());
-
-                    // fts_dev
-                    ftsent[48..52].fill(0);
-
-                    // fts_nlink
-                    ftsent[52..54].copy_from_slice(&1u16.to_le_bytes());
-
-                    // fts_level
-                    ftsent[54..56].copy_from_slice(&(level as i16).to_le_bytes());
-
-                    // fts_info
-                    ftsent[56..58].copy_from_slice(&(fts_info as u16).to_le_bytes());
-
-                    // fts_flags, fts_instr
-                    ftsent[58..62].fill(0);
-
-                    // fts_statp — pointer to the stat struct we allocated above
-                    ftsent[62..66].copy_from_slice(&stat_ptr.to_le_bytes());
-
-                    // inline filename string
-                    ftsent[66..66 + full_path.len()].copy_from_slice(full_path.as_bytes());
-                    ftsent[66 + full_path.len()] = 0;
-
-                    let _ = emu.mem_write(ftsent_ptr as u64, &ftsent);
-                    DispatchOutcome::Ret(ftsent_ptr as u64)
+                    write_ftsent(emu, fs, handle_id, &entry_path, fts_info, level, idx, 0, false)
                 }
             }
         }
@@ -353,7 +409,62 @@ fn dispatch(
                 u32::MAX as u64
             })
         }
-        LibSym::FtsSet => DispatchOutcome::Ret(0),
+        LibSym::FtsSet => {
+            let handle_id = (a0 as u32).saturating_sub(0x50000100);
+            if a2 == FTS_SKIP {
+                with_fts_handle(handle_id, |h| h.set_skip());
+            }
+            DispatchOutcome::Ret(0)
+        }
+        LibSym::FtsChildren => {
+            let handle_id = (a0 as u32).saturating_sub(0x50000100);
+
+            // Snapshot what we need before the mutable borrow in write_ftsent.
+            let (parent_level, children) = match with_fts_handle(handle_id, |h| {
+                // In real fts, fts_children called before the first fts_read returns
+                // NULL — no directory has been entered yet.  We detect this by
+                // checking whether fts_read has ever returned a FTS_D entry
+                // (signalled by current_dir_child_start being non-zero).
+                if h.current_dir_child_start == 0 && h.index == 0 {
+                    return (0u16, vec![]);
+                }
+                (h.current_level, h.direct_children(h.current_level))
+            }) {
+                Some(x) => x,
+                None => return DispatchOutcome::Ret(0),
+            };
+
+            if children.is_empty() {
+                return DispatchOutcome::Ret(0);
+            }
+
+            // Write each child FTSENT into its own mmap_anon allocation and
+            // link them into a singly-linked list via fts_link (offset 8).
+            let mut first_ptr: u32 = 0;
+            let mut prev_ptr: u32 = 0;
+            let _ = parent_level;
+
+            for (path, info, lvl, child_idx) in &children {
+                let outcome = write_ftsent(emu, fs, handle_id, path, *info, *lvl, *child_idx, 0, true);
+                let ftsent_ptr = match outcome {
+                    DispatchOutcome::Ret(v) if v != 0 => v as u32,
+                    _ => continue,
+                };
+
+                if first_ptr == 0 {
+                    first_ptr = ftsent_ptr;
+                }
+                // Wire previous entry's fts_link (offset 8) to this entry.
+                if prev_ptr != 0 {
+                    let link_bytes = ftsent_ptr.to_le_bytes();
+                    let _ = emu.mem_write((prev_ptr + 8) as u64, &link_bytes);
+                }
+                prev_ptr = ftsent_ptr;
+            }
+            // Last entry's fts_link stays 0 (already zero-initialised).
+
+            DispatchOutcome::Ret(first_ptr as u64)
+        }
         LibSym::Getopt => {
             let argc = a0 as i32;
             let argv = a1;
@@ -423,6 +534,30 @@ fn dispatch(
             DispatchOutcome::Ret(0)
         }
         LibSym::Feof | LibSym::Ferror | LibSym::Clearerr => DispatchOutcome::Ret(0),
+
+        LibSym::Mbrtowc => {
+            // mbrtowc(wchar_t *pwc, const char *s, size_t n, mbstate_t *ps)
+            // For ASCII (single-byte): write the byte as a wchar_t and return 1.
+            // Return 0 for NUL, MAX for errors.
+            if a1 == 0 {
+                return DispatchOutcome::Ret(0); // NULL src = reset state
+            }
+            let bytes = read_bytes(emu, a1, 1);
+            let byte = bytes.first().copied().unwrap_or(0);
+            if byte == 0 {
+                return DispatchOutcome::Ret(0); // NUL terminator
+            }
+            if a0 != 0 {
+                write_u32(emu, a0, byte as u32); // write wchar_t
+            }
+            DispatchOutcome::Ret(1) // consumed 1 byte
+        }
+        LibSym::Wcwidth => {
+            // wcwidth(wchar_t wc) — display column width. 1 for printable ASCII.
+            let wc = a0 & 0xFF;
+            let width: u32 = if wc >= 0x20 && wc != 0x7F { 1 } else { 0 };
+            DispatchOutcome::Ret(width as u64)
+        }
 
         // ── Memory ───────────────────────────────────────────────────────────
         LibSym::Malloc => {

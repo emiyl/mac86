@@ -28,6 +28,7 @@ pub enum LibSym {
     FtsRead,
     FtsClose,
     FtsSet,
+    FtsChildren,
     // argv / option parsing
     Getopt,
     // Process
@@ -105,6 +106,9 @@ pub enum LibSym {
     Perror,
     Putchar,
     Getchar,
+    // wide-char / multibyte
+    Mbrtowc,
+    Wcwidth,
     // stdio FILE* operations
     Fileno,
     Fdopen,
@@ -232,6 +236,7 @@ pub fn known_symbol(name: &str) -> Option<LibSym> {
         "fts_read" => Some(LibSym::FtsRead),
         "fts_close" => Some(LibSym::FtsClose),
         "fts_set" => Some(LibSym::FtsSet),
+        "fts_children" => Some(LibSym::FtsChildren),
         "getopt" => Some(LibSym::Getopt),
         "exit" | "_exit" | "quick_exit" => Some(LibSym::Exit),
         "abort" => Some(LibSym::Abort),
@@ -298,6 +303,8 @@ pub fn known_symbol(name: &str) -> Option<LibSym> {
         "perror" => Some(LibSym::Perror),
         "putchar" | "putchar_unlocked" => Some(LibSym::Putchar),
         "getchar" | "getchar_unlocked" => Some(LibSym::Getchar),
+        "mbrtowc" => Some(LibSym::Mbrtowc),
+        "wcwidth" => Some(LibSym::Wcwidth),
         "fileno" | "fileno_unlocked" => Some(LibSym::Fileno),
         "fdopen" => Some(LibSym::Fdopen),
         "fwrite" => Some(LibSym::Fwrite),
