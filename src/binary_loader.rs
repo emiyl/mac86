@@ -50,8 +50,14 @@ pub struct Segment {
 }
 
 /// Load and parse an i386 macOS Mach-O executable.
+///
+/// Transparently handles fat/universal binaries by extracting the i386 slice.
 pub fn load_binary(path: &Path) -> EmulationResult<BinaryInfo> {
-    let bytes = fs::read(path).map_err(|e| EmulationError::BinaryLoadError(e.to_string()))?;
+    let file_bytes =
+        fs::read(path).map_err(|e| EmulationError::BinaryLoadError(e.to_string()))?;
+
+    // Extract the i386 slice from a fat binary, or use the file bytes as-is.
+    let bytes = extract_i386_slice(file_bytes)?;
 
     let macho = MachO::parse(&bytes, 0)
         .map_err(|e| EmulationError::BinaryLoadError(format!("Mach-O parse: {}", e)))?;
@@ -183,6 +189,71 @@ pub fn load_binary(path: &Path) -> EmulationResult<BinaryInfo> {
         raw: bytes,
         dyld_bindings,
     })
+}
+
+// ── fat binary support ────────────────────────────────────────────────────────
+
+/// Extract the i386 (CPU_TYPE_I386 = 7) slice from a fat/universal Mach-O
+/// binary, or return the bytes unchanged when the file is already a thin binary.
+///
+/// Fat binary layout (all fields big-endian):
+///   fat_header : magic(4)=0xCAFEBABE  nfat_arch(4)
+///   fat_arch[] : cputype(4) cpusubtype(4) offset(4) size(4) align(4)  × nfat_arch
+fn extract_i386_slice(bytes: Vec<u8>) -> EmulationResult<Vec<u8>> {
+    const FAT_MAGIC: u32 = 0xCAFE_BABE;
+    const CPU_TYPE_I386: i32 = 7;
+    const FAT_ARCH_SIZE: usize = 20;
+
+    if bytes.len() < 8 {
+        return Ok(bytes);
+    }
+
+    let magic = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+    if magic != FAT_MAGIC {
+        return Ok(bytes); // thin binary — pass through
+    }
+
+    let nfat = u32::from_be_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]) as usize;
+    log::info!("Fat binary detected: {} architecture slices", nfat);
+
+    for i in 0..nfat {
+        let base = 8 + i * FAT_ARCH_SIZE;
+        if base + FAT_ARCH_SIZE > bytes.len() {
+            break;
+        }
+        let cputype = i32::from_be_bytes([
+            bytes[base],
+            bytes[base + 1],
+            bytes[base + 2],
+            bytes[base + 3],
+        ]);
+        if cputype != CPU_TYPE_I386 {
+            continue;
+        }
+        let offset = u32::from_be_bytes([
+            bytes[base + 8],
+            bytes[base + 9],
+            bytes[base + 10],
+            bytes[base + 11],
+        ]) as usize;
+        let size = u32::from_be_bytes([
+            bytes[base + 12],
+            bytes[base + 13],
+            bytes[base + 14],
+            bytes[base + 15],
+        ]) as usize;
+        if offset + size > bytes.len() {
+            return Err(EmulationError::BinaryLoadError(
+                "Fat binary: i386 slice extends past end of file".into(),
+            ));
+        }
+        log::info!("Extracted i386 slice: offset=0x{:x} size=0x{:x}", offset, size);
+        return Ok(bytes[offset..offset + size].to_vec());
+    }
+
+    Err(EmulationError::BinaryLoadError(
+        "Fat binary contains no i386 slice".into(),
+    ))
 }
 
 #[cfg(test)]
