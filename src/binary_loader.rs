@@ -5,36 +5,33 @@ use goblin::mach::MachO;
 use std::fs;
 use std::path::Path;
 
-/// Information about a loaded binary
+/// Information about a loaded i386 Mach-O executable.
 #[derive(Debug, Clone)]
 pub struct BinaryInfo {
     pub name: String,
+    /// Guest virtual address of the process entry point.
     pub entry_point: u32,
-    /// True when `entry_point` is `main()` itself (LC_MAIN), so the process
-    /// setup must push a fake return address instead of relying on crt0.
+    /// `true` when the entry point was derived from `LC_MAIN` and points
+    /// directly at `main()` — the process setup must push a fake return address.
     pub entry_is_main: bool,
-    #[allow(dead_code)]
     pub arch: Architecture,
+    /// `true` when the binary has dynamic library dependencies.
     pub is_dynamic: bool,
-    pub stack_size: u32,
-    pub heap_size: u32,
-    #[allow(dead_code)]
     pub sections: Vec<Section>,
     pub segments: Vec<Segment>,
+    /// Raw file bytes — kept alive for in-place segment loading.
     pub raw: Vec<u8>,
-    /// Non-empty for dynamically linked binaries.
+    /// Import bindings parsed from LC_DYLD_INFO (or classic LC_DYSYMTAB).
     pub dyld_bindings: Option<DyldBindings>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-#[allow(dead_code)]
 pub enum Architecture {
     I386,
     X86_64,
 }
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct Section {
     pub name: String,
     pub addr: u32,
@@ -50,8 +47,6 @@ pub struct Segment {
     pub vsize: u32,
     pub fileoff: u32,
     pub filesize: u32,
-    #[allow(dead_code)]
-    pub prot: u32,
 }
 
 /// Load and parse an i386 macOS Mach-O executable.
@@ -78,21 +73,17 @@ pub fn load_binary(path: &Path) -> EmulationResult<BinaryInfo> {
     }
 
     // ── segments ─────────────────────────────────────────────────────────────
-    let mut segments: Vec<Segment> = Vec::new();
-    for segment in &macho.segments {
-        segments.push(Segment {
-            name: segment
-                .name()
-                .unwrap_or("?")
-                .trim_end_matches('\0')
-                .to_string(),
-            vaddr: segment.vmaddr as u32,
-            vsize: segment.vmsize as u32,
-            fileoff: segment.fileoff as u32,
-            filesize: segment.filesize as u32,
-            prot: segment.initprot,
-        });
-    }
+    let segments: Vec<Segment> = macho
+        .segments
+        .iter()
+        .map(|s| Segment {
+            name: s.name().unwrap_or("?").trim_end_matches('\0').to_string(),
+            vaddr: s.vmaddr as u32,
+            vsize: s.vmsize as u32,
+            fileoff: s.fileoff as u32,
+            filesize: s.filesize as u32,
+        })
+        .collect();
 
     // ── sections ─────────────────────────────────────────────────────────────
     let mut sections: Vec<Section> = Vec::new();
@@ -106,7 +97,7 @@ pub fn load_binary(path: &Path) -> EmulationResult<BinaryInfo> {
                 name,
                 addr: sec.addr as u32,
                 size: sec.size as u32,
-                offset: sec.offset as u32,
+                offset: sec.offset,
                 data: data.to_vec(),
             });
         }
@@ -125,18 +116,13 @@ pub fn load_binary(path: &Path) -> EmulationResult<BinaryInfo> {
 
     let dyld_bindings = if is_dynamic {
         let b = DyldBindings::parse(&macho, &bytes);
-        if !b.imports.is_empty() {
-            Some(b)
-        } else {
-            None
-        }
+        if !b.imports.is_empty() { Some(b) } else { None }
     } else {
         None
     };
 
     // ── entry point ───────────────────────────────────────────────────────────
     // Priority: LC_MAIN > LC_UNIXTHREAD EIP > __text section > first segment.
-
     let text_base: u32 = segments
         .iter()
         .find(|s| s.name.contains("TEXT"))
@@ -148,14 +134,13 @@ pub fn load_binary(path: &Path) -> EmulationResult<BinaryInfo> {
 
     for cmd in &macho.load_commands {
         match cmd.command {
-            // LC_MAIN: entryoff is relative to first __TEXT segment.
             CommandVariant::Main(ref ep) => {
                 entry_point = Some(text_base + ep.entryoff as u32);
                 entry_is_main = true;
                 break;
             }
-            // LC_UNIXTHREAD: parse the i386 thread state to get EIP (index 10).
             _ => {
+                // Parse LC_UNIXTHREAD thread state to extract EIP (index 10).
                 let dump = format!("{:?}", cmd);
                 if let Some(start) = dump.find("thread_state: [") {
                     let rest = &dump[start + "thread_state: [".len()..];
@@ -193,8 +178,6 @@ pub fn load_binary(path: &Path) -> EmulationResult<BinaryInfo> {
         entry_is_main,
         arch: Architecture::I386,
         is_dynamic,
-        stack_size: 8 * 1024 * 1024,
-        heap_size: 32 * 1024 * 1024,
         sections,
         segments,
         raw: bytes,
@@ -207,7 +190,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_architecture_detection() {
-        assert_eq!(Architecture::I386, Architecture::I386);
+    fn test_architecture_variants() {
+        assert_ne!(Architecture::I386, Architecture::X86_64);
     }
 }

@@ -243,8 +243,6 @@ pub fn known_symbol(name: &str) -> Option<LibSym> {
 pub struct Trampoline {
     pub dispatch: HashMap<u32, LibSym>,
     name_to_addr: HashMap<String, u32>,
-    #[allow(dead_code)]
-    sym_to_addr: HashMap<LibSym, u32>,
     pub slot_count: u32,
 }
 
@@ -252,9 +250,10 @@ impl Trampoline {
     pub fn build(bindings: &DyldBindings) -> Self {
         let mut dispatch: HashMap<u32, LibSym> = HashMap::new();
         let mut name_to_addr: HashMap<String, u32> = HashMap::new();
+        // sym_to_addr lets us deduplicate symbols that map to the same handler.
         let mut sym_to_addr: HashMap<LibSym, u32> = HashMap::new();
 
-        // Fixed slots 0-2
+        // Fixed slots 0-2 (always present regardless of imports)
         dispatch.insert(TRAMPOLINE_BASE, LibSym::Exit);
         sym_to_addr.insert(LibSym::Exit, TRAMPOLINE_BASE);
         dispatch.insert(THREAD_SENTINEL_ADDR, LibSym::ThreadSentinel);
@@ -273,7 +272,7 @@ impl Trampoline {
             });
             name_to_addr.insert(imp.name.clone(), addr);
         }
-        Trampoline { dispatch, name_to_addr, sym_to_addr, slot_count: slot }
+        Trampoline { dispatch, name_to_addr, slot_count: slot }
     }
 
     pub fn exit_addr(&self) -> u32 { TRAMPOLINE_BASE }
@@ -881,7 +880,7 @@ fn do_format(emu: &Unicorn<'_, ()>, fmt: &str, vararg_esp: &mut u32) -> String {
         let spec = bytes[i]; i += 1;
         if spec == b'%' { out.push('%'); continue; }
         if spec == b'n' { continue; }
-        let arg = read_u32_ro(emu, *vararg_esp);
+        let arg = read_u32(emu, *vararg_esp);
         *vararg_esp += 4;
         let frag = match spec {
             b'd'|b'i' => padf(format!("{}", arg as i32), width, if zero_pad{'0'}else{' '}, true),
@@ -891,7 +890,7 @@ fn do_format(emu: &Unicorn<'_, ()>, fmt: &str, vararg_esp: &mut u32) -> String {
             b'o'      => padf(format!("{:o}", arg),      width, if zero_pad{'0'}else{' '}, true),
             b'p'      => format!("0x{:x}", arg),
             b's'      => {
-                let s = if arg == 0 { "(null)".to_string() } else { read_cstr_ro(emu, arg) };
+                let s = if arg == 0 { "(null)".to_string() } else { read_cstr(emu, arg) };
                 padf(s, width, ' ', false)
             }
             b'c'      => (arg as u8 as char).to_string(),
@@ -904,20 +903,20 @@ fn do_format(emu: &Unicorn<'_, ()>, fmt: &str, vararg_esp: &mut u32) -> String {
 
 fn padf(s: String, width: usize, pad: char, right: bool) -> String {
     if width <= s.len() { return s; }
-    let padding: String = std::iter::repeat(pad).take(width - s.len()).collect();
+    let padding: String = std::iter::repeat_n(pad, width - s.len()).collect();
     if right { format!("{}{}", padding, s) } else { format!("{}{}", s, padding) }
 }
 
 // ── FPU helpers ───────────────────────────────────────────────────────────────
 
 fn read_f64(emu: &Unicorn<'_, ()>, addr: u32) -> f64 {
-    let lo = read_u32_ro(emu, addr) as u64;
-    let hi = read_u32_ro(emu, addr + 4) as u64;
+    let lo = read_u32(emu, addr) as u64;
+    let hi = read_u32(emu, addr + 4) as u64;
     f64::from_bits(lo | (hi << 32))
 }
 
 fn read_f32(emu: &Unicorn<'_, ()>, addr: u32) -> f32 {
-    f32::from_bits(read_u32_ro(emu, addr))
+    f32::from_bits(read_u32(emu, addr))
 }
 
 /// Write an f64 result to ST(0) using the 80-bit x87 extended-precision format.
@@ -958,22 +957,23 @@ fn f64_to_x87(d: f64) -> [u8; 10] {
 
 // ── guest memory helpers ──────────────────────────────────────────────────────
 
-fn read_u32(emu: &Unicorn<'_, ()>, addr: u32) -> u32 { read_u32_ro(emu, addr) }
-fn read_u32_ro(emu: &Unicorn<'_, ()>, addr: u32) -> u32 {
+fn read_u32(emu: &Unicorn<'_, ()>, addr: u32) -> u32 {
     let mut buf = [0u8; 4];
     let _ = emu.mem_read(addr as u64, &mut buf);
     u32::from_le_bytes(buf)
 }
+
 fn read_bytes(emu: &Unicorn<'_, ()>, addr: u32, len: usize) -> Vec<u8> {
     if len == 0 { return vec![]; }
     let mut buf = vec![0u8; len];
     let _ = emu.mem_read(addr as u64, &mut buf);
     buf
 }
-fn read_cstr(emu: &Unicorn<'_, ()>, addr: u32) -> String { read_cstr_ro(emu, addr) }
-fn read_cstr_ro(emu: &Unicorn<'_, ()>, addr: u32) -> String {
+
+fn read_cstr(emu: &Unicorn<'_, ()>, addr: u32) -> String {
     read_cstr_max(emu, addr, 65_536)
 }
+
 fn read_cstr_max(emu: &Unicorn<'_, ()>, addr: u32, max: usize) -> String {
     let mut bytes = Vec::new();
     for i in 0..max {

@@ -113,7 +113,7 @@ impl VirtualFileSystem {
         let host_path = self.resolve_path(path)?;
 
         if !host_path.exists() && writable {
-            std::fs::write(&host_path, &[])?;
+            std::fs::write(&host_path, [])?;
         } else if !host_path.exists() {
             return Err(EmulationError::FileSystemError(format!(
                 "File not found: {}",
@@ -278,16 +278,6 @@ impl VirtualFileSystem {
             .remove(&fd)
             .ok_or_else(|| EmulationError::FileSystemError(format!("Invalid FD: {}", fd)))?;
         Ok(())
-    }
-
-    /// Read from a file descriptor
-    pub fn read(&mut self, fd: u32, _buf_addr: u32, size: usize) -> EmulationResult<usize> {
-        Ok(self.read_bytes(fd, size)?.len())
-    }
-
-    /// Write to a file descriptor
-    pub fn write(&mut self, fd: u32, _buf_addr: u32, size: usize) -> EmulationResult<usize> {
-        Ok(self.write_bytes(fd, &vec![0u8; size])?)
     }
 
     // ── Heap / mmap ──────────────────────────────────────────────────────────

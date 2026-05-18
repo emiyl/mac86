@@ -1,88 +1,58 @@
 use crate::errors::{EmulationError, EmulationResult};
 use std::path::PathBuf;
 
+/// Flags controlling diagnostic output for an emulation run.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct TraceConfig {
+    /// Print syscall number and arguments at each INT 0x80.
     pub syscalls: bool,
+    /// Print every instruction address as it executes.
     pub instructions: bool,
 }
 
-/// Main emulation context managing the entire i386 environment
+/// Top-level emulation context — carries configuration and prepares the
+/// host environment before handing off to `Process`.
 pub struct EmulationContext {
-    /// Path to the emulation environment
+    /// Optional path for emulation-environment files (SDK root, cached libs).
+    /// The directory is created on startup; currently used only as a future
+    /// hook for multi-binary environments.
     env_path: PathBuf,
-
-    /// Emulation state
-    state: EmulationState,
-
-    /// Trace configuration
     trace_config: TraceConfig,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub enum EmulationState {
-    Uninitialized,
-    Running,
-    Paused,
-    Stopped,
+    initialized: bool,
 }
 
 impl EmulationContext {
-    /// Create a new emulation context
     pub fn new(env_path: Option<PathBuf>, trace_config: TraceConfig) -> EmulationResult<Self> {
         let env_path = env_path.unwrap_or_else(|| {
-            let mut path = dirs::cache_dir().unwrap_or_else(|| PathBuf::from("/tmp"));
-            path.push("mac86_env");
-            path
+            let mut p = dirs::cache_dir().unwrap_or_else(|| PathBuf::from("/tmp"));
+            p.push("mac86_env");
+            p
         });
 
-        // Create environment directory if it doesn't exist
-        std::fs::create_dir_all(&env_path).map_err(|e| EmulationError::IoError(e))?;
+        std::fs::create_dir_all(&env_path).map_err(EmulationError::IoError)?;
 
         Ok(EmulationContext {
             env_path,
-            state: EmulationState::Uninitialized,
             trace_config,
+            initialized: false,
         })
+    }
+
+    /// Prepare for process execution.  Safe to call multiple times.
+    pub fn initialize(&mut self) -> EmulationResult<()> {
+        self.initialized = true;
+        Ok(())
     }
 
     pub fn trace(&self) -> TraceConfig {
         self.trace_config
     }
-
-    /// Get the emulation environment path
-    pub fn env_path(&self) -> &PathBuf {
-        &self.env_path
-    }
-
-    /// Get current emulation state
-    pub fn state(&self) -> EmulationState {
-        self.state
-    }
-
-    /// Set emulation state
-    pub fn set_state(&mut self, state: EmulationState) {
-        self.state = state;
-    }
-
-    /// Initialize the emulation environment
-    pub fn initialize(&mut self) -> EmulationResult<()> {
-        // Setup syscall handlers
-        // Setup memory management
-        // Setup filesystem mappings
-        self.state = EmulationState::Running;
-        Ok(())
-    }
-
-    /// Shutdown the emulation environment
-    pub fn shutdown(&mut self) -> EmulationResult<()> {
-        self.state = EmulationState::Stopped;
-        Ok(())
-    }
 }
 
 impl Drop for EmulationContext {
     fn drop(&mut self) {
-        let _ = self.shutdown();
+        if self.initialized {
+            log::debug!("EmulationContext dropped (env: {})", self.env_path.display());
+        }
     }
 }

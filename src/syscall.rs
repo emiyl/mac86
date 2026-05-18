@@ -504,7 +504,7 @@ fn write_stat_struct(
     buf[8..10].copy_from_slice(&mode.to_le_bytes());
     buf[10..12].copy_from_slice(&1u16.to_le_bytes()); // st_nlink
     buf[48..56].copy_from_slice(&(stat.size as i64).to_le_bytes());
-    let blocks = ((stat.size + 511) / 512) as i64;
+    let blocks = stat.size.div_ceil(512) as i64;
     buf[56..64].copy_from_slice(&blocks.to_le_bytes());
     buf[64..68].copy_from_slice(&4096i32.to_le_bytes());
 
@@ -518,8 +518,9 @@ impl Default for SyscallHandler {
     }
 }
 
-#[allow(dead_code)]
+/// i386 macOS BSD syscall numbers for reference.
 pub mod syscall_numbers {
+    #![allow(dead_code)]
     pub const EXIT: u32 = 1;
     pub const READ: u32 = 3;
     pub const WRITE: u32 = 4;

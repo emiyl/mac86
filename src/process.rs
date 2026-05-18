@@ -5,22 +5,17 @@ use crate::emulator::{EmulationContext, TraceConfig};
 use crate::errors::EmulationResult;
 use crate::filesystem::VirtualFileSystem;
 use crate::libsystem;
-use crate::memory::MemoryManager;
 use crate::syscall::SyscallHandler;
 use log::info;
 use std::cell::RefCell;
 use std::rc::Rc;
 
-/// Represents an emulated i386 process
+/// Represents an emulated i386 process.
 pub struct Process {
     binary: BinaryInfo,
-    #[allow(dead_code)]
-    memory_manager: MemoryManager,
     syscall_handler: SyscallHandler,
     filesystem: Rc<RefCell<VirtualFileSystem>>,
     cpu: CpuEmulator,
-    #[allow(dead_code)]
-    pid: u32,
     trace_config: TraceConfig,
 }
 
@@ -32,19 +27,16 @@ impl Process {
         let syscall_handler = SyscallHandler::new_with_trace(trace_config.syscalls);
 
         let mut cpu = CpuEmulator::new()?;
-        let total_size = 0x80000000u32;
-        cpu.map_memory(0x0, total_size)?;
+        // Map the full 2 GB i386 address space with read/write/execute permissions.
+        cpu.map_memory(0x0, 0x8000_0000)?;
 
-        let memory_manager = MemoryManager::new(total_size as usize);
         let filesystem = Rc::new(RefCell::new(VirtualFileSystem::new()));
 
         Ok(Process {
             binary,
-            memory_manager,
             syscall_handler,
             filesystem,
             cpu,
-            pid: std::process::id(),
             trace_config,
         })
     }
