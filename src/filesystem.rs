@@ -55,17 +55,21 @@ pub fn encode_stat_i386(st: &FileStat, buf: &mut [u8]) {
         buf[off..off + 8].copy_from_slice(&v.to_le_bytes());
     };
 
-    w32(buf, 0, 1);          // st_dev
-    w16(buf, 4, mode);       // st_mode
-    w16(buf, 6, 1);          // st_nlink
-    w64(buf, 8, st.ino);     // st_ino (64-bit)
-    w32(buf, 16, 501);       // st_uid
-    w32(buf, 20, 20);        // st_gid
-    w32(buf, 24, 0);         // st_rdev
-    // offsets 28-63: timestamps (left as zero)
-    w64(buf, 64, st.size);   // st_size
-    w64(buf, 72, st.size / 512 + if st.size % 512 != 0 { 1 } else { 0 }); // st_blocks
-    w32(buf, 80, 4096);      // st_blksize
+    w32(buf, 0, 1); // st_dev
+    w16(buf, 4, mode); // st_mode
+    w16(buf, 6, 1); // st_nlink
+    w64(buf, 8, st.ino); // st_ino (64-bit)
+    w32(buf, 16, 501); // st_uid
+    w32(buf, 20, 20); // st_gid
+    w32(buf, 24, 0); // st_rdev
+                     // offsets 28-63: timestamps (left as zero)
+    w64(buf, 64, st.size); // st_size
+    w64(
+        buf,
+        72,
+        st.size / 512 + if st.size % 512 != 0 { 1 } else { 0 },
+    ); // st_blocks
+    w32(buf, 80, 4096); // st_blksize
 }
 
 /// Virtual filesystem for the emulation environment

@@ -1,15 +1,14 @@
 /// FTS (file tree traversal) handle management for directory operations.
-
 use lazy_static::lazy_static;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
 use walkdir::WalkDir;
 
-pub const FTS_D: u32 = 1;   // preorder directory
-pub const FTS_SL: u32 = 3;  // symbolic link
-pub const FTS_F: u32 = 8;   // regular file
-pub const FTS_DP: u32 = 6;  // postorder directory
+pub const FTS_D: u32 = 1; // preorder directory
+pub const FTS_SL: u32 = 3; // symbolic link
+pub const FTS_F: u32 = 8; // regular file
+pub const FTS_DP: u32 = 6; // postorder directory
 pub const FTS_SKIP: u32 = 4; // fts_set option: skip this directory
 
 #[derive(Clone)]
@@ -60,10 +59,7 @@ pub fn allocate_fts_handle(path_str: &str) -> Option<u32> {
         let is_symlink = entry.path_is_symlink();
 
         // Close any directories whose depth >= current depth (we've left them).
-        while dir_stack
-            .last()
-            .map_or(false, |(_, d)| *d >= depth)
-        {
+        while dir_stack.last().map_or(false, |(_, d)| *d >= depth) {
             let (closed, closed_depth) = dir_stack.pop().unwrap();
             entries.push((closed, FTS_DP, closed_depth));
         }
@@ -139,13 +135,6 @@ impl FtsHandle {
     /// the directory at `parent_level` starting from the current index.
     ///
     /// "Direct child" means level == parent_level + 1 and is not a FTS_DP.
-    ///
-    /// If the entry at the current index is the parent's own FTS_D (which
-    /// happens when fts_children is called before the first fts_read), it is
-    /// skipped so we still return the children correctly.
-    /// Return direct children at `parent_level + 1`, always scanning from just
-    /// after the last FTS_D returned by fts_read (so that extra fts_read calls
-    /// between fts_read(FTS_D) and fts_children don't cause siblings to be skipped).
     pub fn direct_children(&self, parent_level: u16) -> Vec<(PathBuf, u32, u16, usize)> {
         let child_level = parent_level + 1;
         let mut result = Vec::new();

@@ -396,9 +396,17 @@ fn dispatch(
 
             match entry {
                 None => DispatchOutcome::Ret(0),
-                Some((entry_path, fts_info, level, idx)) => {
-                    write_ftsent(emu, fs, handle_id, &entry_path, fts_info, level, idx, 0, false)
-                }
+                Some((entry_path, fts_info, level, idx)) => write_ftsent(
+                    emu,
+                    fs,
+                    handle_id,
+                    &entry_path,
+                    fts_info,
+                    level,
+                    idx,
+                    0,
+                    false,
+                ),
             }
         }
         LibSym::FtsClose => {
@@ -445,7 +453,8 @@ fn dispatch(
             let _ = parent_level;
 
             for (path, info, lvl, child_idx) in &children {
-                let outcome = write_ftsent(emu, fs, handle_id, path, *info, *lvl, *child_idx, 0, true);
+                let outcome =
+                    write_ftsent(emu, fs, handle_id, path, *info, *lvl, *child_idx, 0, true);
                 let ftsent_ptr = match outcome {
                     DispatchOutcome::Ret(v) if v != 0 => v as u32,
                     _ => continue,
