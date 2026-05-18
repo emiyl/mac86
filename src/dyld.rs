@@ -311,6 +311,117 @@ fn read_sleb128(data: &[u8], pos: &mut usize) -> i64 {
     result
 }
 
+// ── rebase opcodes ────────────────────────────────────────────────────────────
+//
+// Rebase adjusts internal pointers by a slide value.  Since we always load at
+// the binary's preferred address (slide = 0), this is a no-op at runtime.
+// We parse the opcodes anyway so we can report unrecognised formats and collect
+// the pointer addresses for future slide support.
+#[derive(Debug, Clone)]
+pub struct RebaseEntry {
+    /// Guest virtual address of the pointer to rebase.
+    pub ptr_addr: u32,
+}
+
+pub fn parse_rebases(macho: &MachO, raw: &[u8]) -> Vec<RebaseEntry> {
+    let segments: Vec<SegInfo> = macho
+        .segments
+        .iter()
+        .map(|s| SegInfo { vmaddr: s.vmaddr as u32 })
+        .collect();
+
+    let mut entries = Vec::new();
+
+    for cmd in &macho.load_commands {
+        let info = match cmd.command {
+            CommandVariant::DyldInfoOnly(ref i) | CommandVariant::DyldInfo(ref i) => i,
+            _ => continue,
+        };
+
+        if info.rebase_size == 0 {
+            return entries;
+        }
+        let start = info.rebase_off as usize;
+        let end   = start + info.rebase_size as usize;
+        if end > raw.len() {
+            return entries;
+        }
+        parse_rebase_opcodes(&raw[start..end], &segments, &mut entries);
+        return entries;
+    }
+    entries
+}
+
+fn parse_rebase_opcodes(opcodes: &[u8], segments: &[SegInfo], out: &mut Vec<RebaseEntry>) {
+    let mut pos = 0usize;
+    let mut seg_idx: usize = 0;
+    let mut seg_offset: u64 = 0;
+
+    while pos < opcodes.len() {
+        let byte = opcodes[pos];
+        let imm  = (byte & 0x0F) as usize;
+        let op   = byte & 0xF0;
+        pos += 1;
+
+        match op {
+            0x00 => break,  // REBASE_OPCODE_DONE
+            0x10 => {},     // SET_TYPE_IMM
+            0x20 => {       // SET_SEGMENT_AND_OFFSET_ULEB
+                seg_idx = imm;
+                seg_offset = read_uleb128(opcodes, &mut pos);
+            }
+            0x30 => {       // ADD_ADDR_ULEB
+                seg_offset = seg_offset.wrapping_add(read_uleb128(opcodes, &mut pos));
+            }
+            0x40 => {       // ADD_ADDR_IMM_SCALED
+                seg_offset = seg_offset.wrapping_add((imm * 4) as u64);
+            }
+            0x50 => {       // DO_REBASE_IMM_TIMES
+                for _ in 0..imm {
+                    if seg_idx < segments.len() {
+                        out.push(RebaseEntry {
+                            ptr_addr: segments[seg_idx].vmaddr.wrapping_add(seg_offset as u32),
+                        });
+                    }
+                    seg_offset = seg_offset.wrapping_add(4);
+                }
+            }
+            0x60 => {       // DO_REBASE_ULEB_TIMES
+                let count = read_uleb128(opcodes, &mut pos);
+                for _ in 0..count {
+                    if seg_idx < segments.len() {
+                        out.push(RebaseEntry {
+                            ptr_addr: segments[seg_idx].vmaddr.wrapping_add(seg_offset as u32),
+                        });
+                    }
+                    seg_offset = seg_offset.wrapping_add(4);
+                }
+            }
+            0x70 => {       // DO_REBASE_ADD_ADDR_ULEB
+                if seg_idx < segments.len() {
+                    out.push(RebaseEntry {
+                        ptr_addr: segments[seg_idx].vmaddr.wrapping_add(seg_offset as u32),
+                    });
+                }
+                seg_offset = seg_offset.wrapping_add(4 + read_uleb128(opcodes, &mut pos));
+            }
+            0x80 => {       // DO_REBASE_ULEB_TIMES_SKIPPING_ULEB
+                let count = read_uleb128(opcodes, &mut pos);
+                let skip  = read_uleb128(opcodes, &mut pos);
+                for _ in 0..count {
+                    if seg_idx < segments.len() {
+                        out.push(RebaseEntry {
+                            ptr_addr: segments[seg_idx].vmaddr.wrapping_add(seg_offset as u32),
+                        });
+                    }
+                    seg_offset = seg_offset.wrapping_add(4 + skip);
+                }
+            }
+            _ => break,
+        }
+    }
+}
+
 fn dedup(imports: &mut Vec<ImportBinding>) {
     imports.sort_by_key(|i| i.ptr_addr);
     imports.dedup_by_key(|i| i.ptr_addr);

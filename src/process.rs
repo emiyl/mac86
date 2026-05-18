@@ -1,5 +1,6 @@
 use crate::binary_loader::BinaryInfo;
 use crate::cpu::CpuEmulator;
+use crate::dyld;
 use crate::emulator::{EmulationContext, TraceConfig};
 use crate::errors::EmulationResult;
 use crate::filesystem::VirtualFileSystem;
@@ -180,11 +181,23 @@ impl Process {
             self.trace_config.instructions,
         )?;
 
+        // ── rebase pass (slide = 0, so all rebase ops are no-ops in value) ──────
+        if self.binary.is_dynamic {
+            if let Ok(macho) = goblin::mach::MachO::parse(&self.binary.raw, 0) {
+                let rebases = dyld::parse_rebases(&macho, &self.binary.raw);
+                if !rebases.is_empty() {
+                    info!("Rebase: {} pointer entries (slide=0, no-op)", rebases.len());
+                }
+            }
+        }
+
         // ── libSystem trampoline (dynamic binaries) ───────────────────────────
         let direct_ret_addr: Option<u32> = if let Some(ref bindings) = self.binary.dyld_bindings {
             let trampoline = libsystem::Trampoline::build(bindings);
 
-            // Collect (ptr_slot_addr, trampoline_addr) patches before any borrows.
+            // Build dlsym lookup map and store it in the VFS before borrowing.
+            let sym_map = trampoline.symbol_map();
+
             let patches: Vec<(u32, u32)> = bindings
                 .imports
                 .iter()
@@ -196,25 +209,17 @@ impl Process {
                 .collect();
 
             let exit_addr = trampoline.exit_addr();
-
-            // Install trampoline hook.
             self.cpu
                 .setup_trampoline_hook(Rc::clone(&self.filesystem), trampoline)?;
 
-            // Fill pointer slots in guest memory.
+            self.filesystem.borrow_mut().trampoline_map = sym_map;
+
             for (slot, taddr) in patches {
-                info!(
-                    "  binding slot 0x{:x} → trampoline 0x{:x}",
-                    slot, taddr
-                );
+                info!("  binding 0x{:x} → trampoline 0x{:x}", slot, taddr);
                 let _ = self.cpu.write_memory(slot, &taddr.to_le_bytes());
             }
 
-            if self.binary.entry_is_main {
-                Some(exit_addr)
-            } else {
-                None
-            }
+            if self.binary.entry_is_main { Some(exit_addr) } else { None }
         } else {
             None
         };

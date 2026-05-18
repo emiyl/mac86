@@ -118,21 +118,31 @@ impl CpuEmulator {
                         Ok((SyscallOutcome::Continue, retval)) => {
                             let _ = emu.reg_write(RegisterX86::EAX, retval & 0xFFFF_FFFF);
                             let _ = emu.reg_write(RegisterX86::EDX, retval >> 32);
+                            let _ = emu.set_pc(addr + 2);
                         }
                         Ok((SyscallOutcome::Exit(status), _)) => {
                             log::info!("sys_exit({})", status);
-                            let _ = emu.reg_write(RegisterX86::EAX, 0);
+                            let _ = emu.reg_write(RegisterX86::EAX, status as u64);
                             let _ = emu.emu_stop();
+                        }
+                        Ok((SyscallOutcome::StateSet, _)) => {
+                            // Handler set PC/ESP directly; do not advance past INT.
+                        }
+                        Ok((SyscallOutcome::DeliverSignal { handler }, _)) => {
+                            // Set up a guest signal frame and jump to the handler.
+                            // Resume address is addr+2 (past the INT instruction).
+                            {
+                                let mut fs_guard = fs.borrow_mut();
+                                deliver_signal(emu, &mut fs_guard, handler, addr as u32 + 2);
+                            }
+                            // PC is now pointed at the handler; do NOT advance.
                         }
                         Err(err) => {
                             log::warn!("syscall error: {}", err);
-                            // Return -1 in EAX; leave EDX unchanged.
                             let _ = emu.reg_write(RegisterX86::EAX, 0xFFFF_FFFF);
+                            let _ = emu.set_pc(addr + 2);
                         }
                     }
-
-                    // Skip the 2-byte INT instruction.
-                    let _ = emu.set_pc(addr + 2);
                 },
             )
             .map_err(|e| {
@@ -254,6 +264,47 @@ impl CpuEmulator {
             eip: self.emu.reg_read(RegisterX86::EIP).unwrap_or(0) as u32,
         })
     }
+}
+
+/// Set up a guest signal frame and switch execution to the handler.
+///
+/// Uses the same continuation-stack mechanism as `pthread_create`.  When the
+/// handler returns to `SIGNAL_RETURN_ADDR`, the libsystem trampoline pops the
+/// saved context and resumes execution at `resume_addr`.
+fn deliver_signal(
+    emu: &mut Unicorn<'_, ()>,
+    fs: &mut VirtualFileSystem,
+    handler: u32,
+    resume_addr: u32,
+) {
+    use crate::libsystem::SIGNAL_RETURN_ADDR;
+    use crate::threads::ThreadContinuation;
+
+    let esp = emu.reg_read(RegisterX86::ESP).unwrap_or(0) as u32;
+
+    // Push signal number (2 = SIGINT) then the sentinel return address.
+    let mut new_esp = esp;
+    new_esp -= 4;
+    let _ = emu.mem_write(new_esp as u64, &2u32.to_le_bytes()); // signum
+    new_esp -= 4;
+    let _ = emu.mem_write(new_esp as u64, &SIGNAL_RETURN_ADDR.to_le_bytes());
+
+    // Save the interrupted context.
+    let cont = ThreadContinuation {
+        ret_addr: resume_addr,
+        tid: 0, // 0 = signal return (not a real thread)
+        ebx: emu.reg_read(RegisterX86::EBX).unwrap_or(0) as u32,
+        ecx: emu.reg_read(RegisterX86::ECX).unwrap_or(0) as u32,
+        edx: emu.reg_read(RegisterX86::EDX).unwrap_or(0) as u32,
+        esi: emu.reg_read(RegisterX86::ESI).unwrap_or(0) as u32,
+        edi: emu.reg_read(RegisterX86::EDI).unwrap_or(0) as u32,
+        ebp: emu.reg_read(RegisterX86::EBP).unwrap_or(0) as u32,
+        esp,
+    };
+    fs.threads.continuations.push(cont);
+
+    let _ = emu.reg_write(RegisterX86::ESP, new_esp as u64);
+    let _ = emu.set_pc(handler as u64);
 }
 
 /// Snapshot of CPU state for debugging

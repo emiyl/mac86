@@ -41,6 +41,10 @@ pub struct SyscallHandler {
 pub enum SyscallOutcome {
     Continue,
     Exit(i32),
+    /// Handler set PC/ESP directly — skip the normal `set_pc(addr+2)` advance.
+    StateSet,
+    /// Deliver a guest signal: cpu.rs sets up the handler frame then skips the INT.
+    DeliverSignal { handler: u32 },
 }
 
 impl SyscallHandler {
@@ -63,8 +67,12 @@ impl SyscallHandler {
         args: SyscallArgs,
     ) -> EmulationResult<(SyscallOutcome, u64)> {
         // Check for host SIGINT / SIGTERM before every syscall.
-        if STOP_REQUESTED.load(Ordering::Relaxed) {
-            log::info!("Host signal received — stopping emulation");
+        if STOP_REQUESTED.swap(false, Ordering::Relaxed) {
+            log::info!("Host SIGINT/SIGTERM received");
+            // If the guest registered a SIGINT handler, invoke it.
+            if let Some(&handler) = fs.threads.signal_handlers.get(&2) {
+                return Ok((SyscallOutcome::DeliverSignal { handler }, 0));
+            }
             return Ok((SyscallOutcome::Exit(130), 0));
         }
 

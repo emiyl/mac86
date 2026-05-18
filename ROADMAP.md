@@ -65,12 +65,29 @@
 - [ ] Guest signal delivery (invoke registered handler in guest context)
 - [ ] pthread_cancel / pthread_testcancel
 
-## Phase 6: Advanced Dynamic Linking
-- [ ] Multiple dylib loading (libm, libc++, CoreFoundation stubs)
-- [ ] dlopen / dlsym / dlclose
-- [ ] ASLR slide computation and rebase
-- [ ] Objective-C runtime stubs (enough for NSLog)
-- [ ] Lazy binding (dyld_stub_binder simulation)
+## Phase 6: Advanced Dynamic Linking ✅
+- [x] dlopen — returns a fake handle for libSystem, libm, libpthread, libc++, Foundation, CoreFoundation
+- [x] dlsym — resolves symbols via the trampoline_map stored in VFS at load time
+- [x] dlclose / dlerror — stubs
+- [x] Rebase opcode parser (dyld.rs) — slide=0 so no-op, but full parse for future ASLR
+- [x] More libSystem symbols: sprintf/snprintf, atoi/strtol/strtoul/strtod/atof,
+       strcasecmp/strncasecmp, strstr/strtok/strsep/strrchr/memchr,
+       isdigit/isalpha/isalnum/isspace/isupper/islower/ispunct, toupper/tolower,
+       abs/labs, perror, putchar/getchar, setenv/unsetenv
+- [x] Math functions (double + float): sin/cos/tan/sqrt/pow/log/log2/log10/exp/exp2/
+       floor/ceil/round/fabs/fmod/atan/atan2/asin/acos/sinh/cosh/tanh + f32 variants;
+       results written to x87 ST(0) via 80-bit extended-precision conversion
+- [x] NSLog — reads CFConstantString UTF-8 pointer at offset 8, formats like printf
+- [x] Objective-C runtime stubs: objc_msgSend, objc_msgSend_stret, objc_getClass,
+       objc_lookUpClass (all return nil/0 — enough to not crash on ObjC calls)
+- [x] Guest SIGINT delivery — if sigaction registered a handler, invoke it via the
+       continuation-stack mechanism; otherwise exit(130)
+- [x] SyscallOutcome::DeliverSignal and StateSet — cpu.rs no longer unconditionally
+       advances PC past INT; each arm now controls its own set_pc
+- [x] pthread_cancel / pthread_testcancel — stubs (return 0)
+- [ ] Multiple real dylib loading (would require a second binary_loader pass)
+- [ ] Lazy binding (dyld_stub_binder — currently all bindings are load-time eager)
+- [ ] ASLR non-zero slide (rebase patches implemented but slide always 0)
 
 ## Phase 7: Real-World Compatibility
 - [ ] Fat/Universal binary support (extract i386 slice)

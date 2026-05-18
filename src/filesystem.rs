@@ -30,6 +30,10 @@ pub struct VirtualFileSystem {
 
     /// Thread table (TIDs, TLS, once, signal handlers).
     pub threads: ThreadTable,
+
+    /// Symbol name → trampoline address for dlsym lookups.
+    /// Populated after the libsystem trampoline is built.
+    pub trampoline_map: HashMap<String, u32>,
 }
 
 #[derive(Debug, Clone)]
@@ -44,10 +48,11 @@ impl VirtualFileSystem {
         let mut vfs = VirtualFileSystem {
             mounts: HashMap::new(),
             file_descriptors: HashMap::new(),
-            next_fd: 3, // stdin, stdout, stderr are 0, 1, 2
+            next_fd: 3,
             heap_break: 0x1000_0000,
             mmap_next: 0x2000_0000,
             threads: ThreadTable::new(),
+            trampoline_map: HashMap::new(),
         };
 
         // Mount standard file descriptors
