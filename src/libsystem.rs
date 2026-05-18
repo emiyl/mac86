@@ -12,6 +12,10 @@ use crate::dyld::DyldBindings;
 use crate::filesystem::VirtualFileSystem;
 use crate::threads::ThreadContinuation;
 use std::collections::HashMap;
+use std::sync::Mutex;
+use std::path::PathBuf;
+use walkdir::WalkDir;
+use lazy_static::lazy_static;
 use unicorn_engine::{RegisterX86, Unicorn};
 
 pub const TRAMPOLINE_BASE: u32 = 0x5000_0000;
@@ -20,12 +24,83 @@ pub const SIGNAL_RETURN_ADDR: u32 = TRAMPOLINE_BASE + 8;
 pub const OPTIND_STORAGE_ADDR: u32 = 0x5000_F000;
 pub const OPTARG_STORAGE_ADDR: u32 = 0x5000_F004;
 
+// ── FTS handle management (using Rust walkdir) ───────────────────────────────
+
+#[derive(Clone)]
+pub struct FtsHandle {
+    entries: Vec<(PathBuf, u32, u16)>, // (path, fts_info, level)
+    index: usize,
+}
+
+lazy_static! {
+    static ref FTS_HANDLES: Mutex<HashMap<u32, FtsHandle>> = Mutex::new(HashMap::new());
+    static ref FTS_COUNTER: Mutex<u32> = Mutex::new(1);
+}
+
+pub fn allocate_fts_handle(path_str: &str) -> Option<u32> {
+    let path = std::path::Path::new(path_str);
+    let mut entries = Vec::new();
+    
+    // Walk directory and collect entries in post-order (for proper deletion)
+    // Post-order: children first, then parent
+    let mut all_entries = Vec::new();
+    for entry in WalkDir::new(path)
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
+        let entry_path = entry.path().to_path_buf();
+        let level = entry.depth() as u16;
+        let is_dir = entry.file_type().is_dir();
+        
+        all_entries.push((entry_path, is_dir, level));
+    }
+    
+    // Sort to get post-order: deeper items first, then parents
+    // This ensures we delete files before directories
+    all_entries.sort_by(|a, b| {
+        // Sort by depth descending (deeper items first)
+        // Then by path length descending (longer paths first, which are typically files)
+        match b.2.cmp(&a.2) {
+            std::cmp::Ordering::Equal => b.0.as_os_str().len().cmp(&a.0.as_os_str().len()),
+            other => other,
+        }
+    });
+    
+    // Convert to (path, fts_info, level) where:
+    // FTS_D = 1 (preorder directory), FTS_F = 8 (regular file), FTS_DP = 6 (postorder directory)
+    // rm -r performs rmdir on FTS_DP entries, so the root must also be FTS_DP.
+    for (entry_path, is_dir, level) in all_entries {
+        // Use FTS_F=8 for files and FTS_DP=6 for directories.
+        let fts_info = if is_dir { 
+            6  // FTS_DP for post-order directories (including root)
+        } else { 
+            8  // FTS_F for files
+        };
+        
+        entries.push((entry_path, fts_info, level));
+    }
+    
+    let handle = FtsHandle {
+        entries,
+        index: 0,
+    };
+    
+    let mut counter = FTS_COUNTER.lock().unwrap();
+    let handle_id = *counter;
+    *counter = counter.wrapping_add(1);
+    
+    FTS_HANDLES.lock().unwrap().insert(handle_id, handle);
+    Some(handle_id)
+}
+
 // ── symbol catalogue ─────────────────────────────────────────────────────────
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum LibSym {
     // I/O
-    Write, Writev, Read, Open, Close, Mkdir,
+    Write, Writev, Read, Open, Close, Mkdir, Unlink, Rmdir, Lstat,
+    // FTS (file tree traversal)
+    FtsOpen, FtsRead, FtsClose, FtsSet,
     // argv / option parsing
     Getopt,
     // Process
@@ -93,6 +168,13 @@ pub fn known_symbol(name: &str) -> Option<LibSym> {
         "open" |"open_nocancel"                => Some(LibSym::Open),
         "close"|"close_nocancel"               => Some(LibSym::Close),
         "mkdir"                                => Some(LibSym::Mkdir),
+        "unlink"|"unlink$UNIX2003"             => Some(LibSym::Unlink),
+        "rmdir"|"rmdir$UNIX2003"               => Some(LibSym::Rmdir),
+        "lstat"|"lstat$INODE64"|"lstat$UNIX2003" => Some(LibSym::Lstat),
+        "fts_open"|"fts_open$INODE64"         => Some(LibSym::FtsOpen),
+        "fts_read"|"fts_read$INODE64"         => Some(LibSym::FtsRead),
+        "fts_close"|"fts_close$INODE64"       => Some(LibSym::FtsClose),
+        "fts_set"|"fts_set$INODE64"           => Some(LibSym::FtsSet),
         "getopt"                               => Some(LibSym::Getopt),
         "exit" |"_exit"|"quick_exit"           => Some(LibSym::Exit),
         "abort"                                => Some(LibSym::Abort),
@@ -405,6 +487,262 @@ fn dispatch(
                 Ok(_) => DispatchOutcome::Ret(0),
                 Err(_) => DispatchOutcome::Ret(u32::MAX as u64),
             }
+        }
+        LibSym::Unlink => {
+            eprintln!("[libsystem] unlink: a0=0x{:x} (should be fts_path pointer)", a0);
+            // Try reading a few bytes from that location to debug
+            if a0 > 0 {
+                let sample = read_bytes(emu, a0, 8);
+                eprintln!("[libsystem] unlink: memory at a0: {:02x?}", sample);
+            }
+            let path = read_cstr(emu, a0);
+            eprintln!("[libsystem] unlink: path='{}' (len={})", path, path.len());
+            match fs.unlink(std::path::Path::new(&path)) {
+                Ok(_) => {
+                    eprintln!("[libsystem] unlink: success");
+                    DispatchOutcome::Ret(0)
+                },
+                Err(e) => {
+                    eprintln!("[libsystem] unlink error: {:?}", e);
+                    DispatchOutcome::Ret(u32::MAX as u64)
+                },
+            }
+        }
+        LibSym::Rmdir => {
+            let path = read_cstr(emu, a0);
+            eprintln!("[libsystem] rmdir: {}", path);
+            match fs.rmdir(std::path::Path::new(&path)) {
+                Ok(_) => {
+                    eprintln!("[libsystem] rmdir: success");
+                    DispatchOutcome::Ret(0)
+                },
+                Err(e) => {
+                    eprintln!("[libsystem] rmdir error: {:?}", e);
+                    DispatchOutcome::Ret(u32::MAX as u64)
+                },
+            }
+        }
+        LibSym::Lstat => {
+            // lstat(const char *path, struct stat *sb)
+            // Return basic stat info about a path
+            let path = read_cstr(emu, a0);
+            eprintln!("[libsystem] lstat: {}", path);
+            let stat_ptr = a1;
+            match fs.stat_path(std::path::Path::new(&path)) {
+                Ok(fstat) => {
+                    // Write basic struct stat - on i386 macOS this is ~120 bytes.
+                    // Fill the critical fields that rm -r cares about:
+                    // st_mode (offset 4): 0x4000 for directory, 0x8000 for regular file
+                    let mode: u32 = if fstat.is_dir { 0x41ED } else { 0x81A4 }; // S_IFDIR|0755 or S_IFREG|0644
+                    let size: u64 = fstat.size;
+                    
+                    // i386 macOS stat struct layout:
+                    // 0-3: st_dev, 4-7: st_ino, 8-11: st_mode, 12-13: st_nlink, 14-17: st_uid, 18-21: st_gid...
+                    let mut stat_buf = vec![0u8; 120];
+                    stat_buf[0..4].copy_from_slice(&1u32.to_le_bytes()); // st_dev = 1
+                    stat_buf[4..8].copy_from_slice(&1u32.to_le_bytes()); // st_ino = 1
+                    stat_buf[8..12].copy_from_slice(&mode.to_le_bytes()); // st_mode
+                    stat_buf[12..14].copy_from_slice(&1u16.to_le_bytes()); // st_nlink = 1
+                    stat_buf[14..18].copy_from_slice(&501u32.to_le_bytes()); // st_uid = 501
+                    stat_buf[18..22].copy_from_slice(&20u32.to_le_bytes()); // st_gid = 20
+                    stat_buf[40..48].copy_from_slice(&size.to_le_bytes()); // st_size at offset 40
+                    
+                    let _ = emu.mem_write(stat_ptr as u64, &stat_buf);
+                    eprintln!("[libsystem] lstat: success, is_dir={}", fstat.is_dir);
+                    DispatchOutcome::Ret(0)
+                },
+                Err(e) => {
+                    // Path doesn't exist or error accessing it
+                    eprintln!("[libsystem] lstat error: {:?}", e);
+                    DispatchOutcome::Ret(u32::MAX as u64)
+                },
+            }
+        }
+        LibSym::FtsOpen => {
+            // fts_open(char * const *path_argv, int options, int (*compar)())
+            // path_argv is a pointer to an array of path strings (like argv)
+            let argv_ptr = a0;
+            
+            // Read the first string pointer from the array
+            let first_path_ptr = read_u32(emu, argv_ptr);
+            let path = read_cstr(emu, first_path_ptr);
+            eprintln!("[libsystem] fts_open: path='{}' (from argv at 0x{:x})", path, argv_ptr);
+            
+            // Resolve guest path to host path
+            let host_path = match fs.resolve_path(std::path::Path::new(&path)) {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("[libsystem] fts_open: path resolution failed: {:?}", e);
+                    return DispatchOutcome::Ret(0);
+                }
+            };
+            
+            match allocate_fts_handle(host_path.to_str().unwrap_or("")) {
+                Some(handle_id) => {
+                    eprintln!("[libsystem] fts_open: success, handle={}", handle_id);
+                    // Return handle ID as a non-NULL pointer-like value
+                    DispatchOutcome::Ret((0x50000100 + handle_id as u32) as u64)
+                },
+                None => {
+                    eprintln!("[libsystem] fts_open: failed to allocate handle");
+                    DispatchOutcome::Ret(0)
+                }
+            }
+        }
+        LibSym::FtsRead => {
+            // fts_read(FTS *ftsp)
+            // Returns pointer to FTSENT or NULL when done
+            // Real macOS FTSENT structure (i386):
+            // 0-3: fts_cycle, 4-7: fts_parent, 8-11: fts_link
+            // 12-15: fts_number, 16-19: fts_pointer
+            // 20-23: fts_accpath, 24-27: fts_path (pointer to filename)
+            // 28-31: fts_errno, 32-35: fts_symfd
+            // 36-37: fts_pathlen, 38-39: fts_namelen
+            // 40-47: fts_ino, 48-51: fts_dev, 52-53: fts_nlink
+            // 54-55: fts_level, 56-57: fts_info, 58-59: fts_flags
+            // 60-61: fts_instr, 62-65: fts_statp
+            // 66+: fts_name[1]
+            
+            let fts_opaque = a0 as u32;
+            let handle_id = fts_opaque.saturating_sub(0x50000100);
+            
+            eprintln!("[libsystem] fts_read: handle_id={}", handle_id);
+            
+            let mut handles = FTS_HANDLES.lock().unwrap();
+            match handles.get_mut(&handle_id) {
+                None => {
+                    eprintln!("[libsystem] fts_read: handle not found");
+                    DispatchOutcome::Ret(0)
+                },
+                Some(handle) => {
+                    if handle.index >= handle.entries.len() {
+                        eprintln!("[libsystem] fts_read: end of entries");
+                        DispatchOutcome::Ret(0)
+                    } else {
+                        let (entry_path, fts_info, level) = &handle.entries[handle.index];
+                        // Use full path as fts_name
+                        let full_path = entry_path.to_string_lossy().to_string();
+                        
+                        eprintln!("[libsystem] fts_read[{}]: {} (level={})", handle.index, full_path, level);
+                                                let fts_info_name = match *fts_info {
+                                                    1 => "FTS_D",
+                                                    6 => "FTS_DP",
+                                                    8 => "FTS_F",
+                                                    _ => "UNKNOWN"
+                                                };
+                                                eprintln!("[libsystem]   fts_info={} ({})", fts_info, fts_info_name);
+                        
+                        // Allocate FTSENT at a fixed location based on handle_id and index
+                        // Using 0x5fff0000 as a base for FTSENT storage
+                        let ftsent_ptr = 0x5fff0000u32 + (handle_id as u32 * 4096) + (handle.index as u32 * 128);
+                        
+                        // Build i386 macOS FTSENT struct
+                        // Include space for the filename string which starts at offset 66.
+                        let mut ftsent = vec![0u8; 66 + full_path.len() + 1];
+                        
+                        // Offset 0-3: fts_cycle (NULL)
+                        ftsent[0..4].copy_from_slice(&0u32.to_le_bytes());
+                        
+                        // Offset 4-7: fts_parent (NULL)
+                        ftsent[4..8].copy_from_slice(&0u32.to_le_bytes());
+                        
+                        // Offset 8-11: fts_link (NULL)
+                        ftsent[8..12].copy_from_slice(&0u32.to_le_bytes());
+                        
+                        // Offset 12-15: fts_number
+                        ftsent[12..16].copy_from_slice(&0u32.to_le_bytes());
+                        
+                        // Offset 16-19: fts_pointer (NULL)
+                        ftsent[16..20].copy_from_slice(&0u32.to_le_bytes());
+                        
+                        // Offset 20-23: fts_accpath - pointer to filename string  
+                        let name_offset = 66u32;
+                        let name_ptr = ftsent_ptr + name_offset;
+                        ftsent[20..24].copy_from_slice(&name_ptr.to_le_bytes());
+                        
+                        // Offset 24-27: fts_path - pointer to filename string (same as fts_accpath)
+                        ftsent[24..28].copy_from_slice(&name_ptr.to_le_bytes());
+                        
+                        // Offset 28-31: fts_errno
+                        ftsent[28..32].copy_from_slice(&0u32.to_le_bytes());
+                        
+                        // Offset 32-35: fts_symfd
+                        ftsent[32..36].copy_from_slice(&0u32.to_le_bytes());
+                        
+                        // Offset 36-37: fts_pathlen
+                        ftsent[36..38].copy_from_slice(&(full_path.len() as u16).to_le_bytes());
+                        
+                        // Offset 38-39: fts_namelen
+                        ftsent[38..40].copy_from_slice(&(full_path.len() as u16).to_le_bytes());
+                        
+                        // Offset 40-47: fts_ino (8 bytes)
+                        ftsent[40..48].copy_from_slice(&(handle.index as u64).to_le_bytes());
+                        
+                        // Offset 48-51: fts_dev
+                        ftsent[48..52].copy_from_slice(&0u32.to_le_bytes());
+                        
+                        // Offset 52-53: fts_nlink
+                        ftsent[52..54].copy_from_slice(&1u16.to_le_bytes());
+                        
+                        // Offset 54-55: fts_level
+                        ftsent[54..56].copy_from_slice(&(*level as i16).to_le_bytes());
+                        
+                        // Offset 56-57: fts_info - FTS_F=8 for file, FTS_D=1 for dir
+                        ftsent[56..58].copy_from_slice(&(*fts_info as u16).to_le_bytes());
+                        
+                        // Offset 58-59: fts_flags
+                        ftsent[58..60].copy_from_slice(&0u16.to_le_bytes());
+                        
+                        // Offset 60-61: fts_instr
+                        ftsent[60..62].copy_from_slice(&0u16.to_le_bytes());
+                        
+                        // Offset 62-65: fts_statp (NULL)
+                        ftsent[62..66].copy_from_slice(&0u32.to_le_bytes());
+                        
+                        // Copy filename string directly into FTSENT at offset 66
+                        ftsent[66..66 + full_path.len()].copy_from_slice(full_path.as_bytes());
+                        // Null-terminate
+                        ftsent[66 + full_path.len()] = 0;
+                        
+                        // Write complete FTSENT (including string) to guest memory
+                        let _ = emu.mem_write(ftsent_ptr as u64, &ftsent);
+                        
+                        // Debug: Read back what we wrote to verify
+                        let verify = read_bytes(emu, ftsent_ptr as u32, 32);
+                        eprintln!("[libsystem]   FTSENT at 0x{:x}: bytes 0-31: {:02x?}", ftsent_ptr, verify);
+                        let ftsent_path_ptr = read_u32(emu, ftsent_ptr + 24);
+                        eprintln!("[libsystem]   fts_path pointer (at offset 24): 0x{:x}", ftsent_path_ptr);
+                        let path_str = read_cstr(emu, ftsent_path_ptr);
+                        eprintln!("[libsystem]   path from fts_path: '{}'", path_str);
+                        
+                        handle.index += 1;
+                        DispatchOutcome::Ret(ftsent_ptr as u64)
+                    }
+                }
+            }
+        }
+        LibSym::FtsClose => {
+            // fts_close(FTS *ftsp)
+            let fts_opaque = a0 as u32;
+            let handle_id = fts_opaque.saturating_sub(0x50000100);
+            
+            eprintln!("[libsystem] fts_close: handle_id={}", handle_id);
+            
+            let mut handles = FTS_HANDLES.lock().unwrap();
+            if handles.remove(&handle_id).is_some() {
+                eprintln!("[libsystem] fts_close: success");
+                DispatchOutcome::Ret(0)
+            } else {
+                eprintln!("[libsystem] fts_close: handle not found");
+                DispatchOutcome::Ret(u32::MAX as u64)
+            }
+        }
+        LibSym::FtsSet => {
+            // fts_set(FTS *ftsp, FTSENT *f, int options)
+            // Set options on current entry - mostly used to prune directories
+            let _handle_id = a0 as u32;
+            eprintln!("[libsystem] fts_set: no-op");
+            DispatchOutcome::Ret(0)
         }
         LibSym::Getopt => {
             // Minimal getopt for common BSD/GNU loops used by coreutils.

@@ -288,6 +288,22 @@ impl VirtualFileSystem {
         Ok(())
     }
 
+    /// Remove a file
+    pub fn unlink(&self, path: &Path) -> EmulationResult<()> {
+        let host_path = self.resolve_path(path)?;
+        std::fs::remove_file(&host_path)
+            .map_err(|e| EmulationError::FileSystemError(format!("unlink failed: {}", e)))?;
+        Ok(())
+    }
+
+    /// Remove an empty directory
+    pub fn rmdir(&self, path: &Path) -> EmulationResult<()> {
+        let host_path = self.resolve_path(path)?;
+        std::fs::remove_dir(&host_path)
+            .map_err(|e| EmulationError::FileSystemError(format!("rmdir failed: {}", e)))?;
+        Ok(())
+    }
+
     // ── Heap / mmap ──────────────────────────────────────────────────────────
 
     /// Set or query the program break. Passing 0 queries the current break.
