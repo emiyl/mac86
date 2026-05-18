@@ -131,6 +131,20 @@ fn dispatch(
                 Err(_) => DispatchOutcome::Ret(u32::MAX as u64),
             }
         }
+        LibSym::Fstat => {
+            let fd = a0;
+            let stat_ptr = a1;
+
+            match fs.fstat_fd(fd) {
+                Ok(fst) => {
+                    let mut buf = vec![0u8; 120];
+                    crate::filesystem::encode_stat_i386(&fst, &mut buf);
+                    let _ = emu.mem_write(stat_ptr as u64, &buf);
+                    DispatchOutcome::Ret(0)
+                }
+                Err(_) => DispatchOutcome::Ret(u32::MAX as u64),
+            }
+        }
         LibSym::Stat => {
             let path = read_cstr(emu, a0);
             let stat_ptr = a1;
@@ -179,6 +193,40 @@ fn dispatch(
             let old_path = read_cstr(emu, a0);
             let new_path = read_cstr(emu, a1);
             match fs.rename(path::Path::new(&old_path), path::Path::new(&new_path)) {
+                Ok(_) => DispatchOutcome::Ret(0),
+                Err(_) => DispatchOutcome::Ret(u32::MAX as u64),
+            }
+        }
+        LibSym::Chmod => {
+            let path = read_cstr(emu, a0);
+            let mode = a1 & 0xFFF;
+            match fs.chmod(path::Path::new(&path), mode) {
+                Ok(_) => DispatchOutcome::Ret(0),
+                Err(_) => DispatchOutcome::Ret(u32::MAX as u64),
+            }
+        }
+        LibSym::Fchmod => {
+            let fd = a0;
+            let mode = a1 & 0xFFF;
+            match fs.fchmod(fd, mode) {
+                Ok(_) => DispatchOutcome::Ret(0),
+                Err(_) => DispatchOutcome::Ret(u32::MAX as u64),
+            }
+        }
+        LibSym::Chown => {
+            let path = read_cstr(emu, a0);
+            let owner = a1;
+            let group = a2;
+            match fs.chown(path::Path::new(&path), owner, group) {
+                Ok(_) => DispatchOutcome::Ret(0),
+                Err(_) => DispatchOutcome::Ret(u32::MAX as u64),
+            }
+        }
+        LibSym::Fchown => {
+            let fd = a0;
+            let owner = a1;
+            let group = a2;
+            match fs.fchown(fd, owner, group) {
                 Ok(_) => DispatchOutcome::Ret(0),
                 Err(_) => DispatchOutcome::Ret(u32::MAX as u64),
             }

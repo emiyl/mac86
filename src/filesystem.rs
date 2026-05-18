@@ -407,6 +407,102 @@ impl VirtualFileSystem {
         Ok(())
     }
 
+    /// Change permissions of a file
+    pub fn chmod(&self, path: &Path, mode: u32) -> EmulationResult<()> {
+        let host_path = self.resolve_path(path)?;
+        let mut perms = std::fs::metadata(&host_path)?.permissions();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            perms.set_mode(mode);
+            std::fs::set_permissions(&host_path, perms)
+                .map_err(|e| EmulationError::FileSystemError(format!("chmod failed: {}", e)))?;
+        }
+        #[cfg(not(unix))]
+        {
+            return Err(EmulationError::FileSystemError(
+                "chmod not supported on this platform".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn fchmod(&self, fd: u32, mode: u32) -> EmulationResult<()> {
+        let file_desc = self
+            .file_descriptors
+            .get(&fd)
+            .ok_or_else(|| EmulationError::FileSystemError(format!("Invalid FD: {}", fd)))?;
+
+        let host_path = &file_desc.host_path;
+        let mut perms = std::fs::metadata(host_path)?.permissions();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            perms.set_mode(mode);
+            std::fs::set_permissions(host_path, perms)
+                .map_err(|e| EmulationError::FileSystemError(format!("fchmod failed: {}", e)))?;
+        }
+        #[cfg(not(unix))]
+        {
+            return Err(EmulationError::FileSystemError(
+                "fchmod not supported on this platform".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Change ownership of a file (chown semantics). Not fully supported in emulation - will only succeed if the requested UID/GID matches the current owner.
+    pub fn chown(&self, path: &Path, uid: u32, gid: u32) -> EmulationResult<()> {
+        let host_path = self.resolve_path(path)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let meta = std::fs::metadata(&host_path)?;
+            let current_uid = meta.uid();
+            let current_gid = meta.gid();
+            if uid != current_uid || gid != current_gid {
+                return Err(EmulationError::FileSystemError(
+                    "chown failed: changing ownership not supported in this emulation".into(),
+                ));
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            return Err(EmulationError::FileSystemError(
+                "chown not supported on this platform".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn fchown(&self, fd: u32, uid: u32, gid: u32) -> EmulationResult<()> {
+        let file_desc = self
+            .file_descriptors
+            .get(&fd)
+            .ok_or_else(|| EmulationError::FileSystemError(format!("Invalid FD: {}", fd)))?;
+
+        let host_path = &file_desc.host_path;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let meta = std::fs::metadata(host_path)?;
+            let current_uid = meta.uid();
+            let current_gid = meta.gid();
+            if uid != current_uid || gid != current_gid {
+                return Err(EmulationError::FileSystemError(
+                    "fchown failed: changing ownership not supported in this emulation".into(),
+                ));
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            return Err(EmulationError::FileSystemError(
+                "fchown not supported on this platform".into(),
+            ));
+        }
+        Ok(())
+    }
+
     // ── Heap / mmap ──────────────────────────────────────────────────────────
 
     /// Set or query the program break. Passing 0 queries the current break.
