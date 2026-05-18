@@ -86,8 +86,16 @@ pub struct VirtualFileSystem {
     /// Program break for brk(2). Starts well above typical binary load address.
     heap_break: u32,
 
-    /// Bump pointer for anonymous mmap allocations.
+    /// Bump pointer for anonymous mmap allocations (thread stacks, FTS, etc.).
     mmap_next: u32,
+
+    /// Tracks the aligned size of each live guest heap allocation (addr → size).
+    alloc_sizes: HashMap<u32, u32>,
+
+    /// Free list for guest heap: (addr, size) pairs kept sorted by address.
+    /// Used by heap_alloc / heap_free to implement a first-fit allocator with
+    /// adjacent-block coalescing, so free() actually reclaims memory.
+    free_list: Vec<(u32, u32)>,
 
     /// Thread table (TIDs, TLS, once, signal handlers).
     pub threads: ThreadTable,
@@ -112,6 +120,8 @@ impl VirtualFileSystem {
             next_fd: 3,
             heap_break: 0x1000_0000,
             mmap_next: 0x2000_0000,
+            alloc_sizes: HashMap::new(),
+            free_list: Vec::new(),
             threads: ThreadTable::new(),
             trampoline_map: HashMap::new(),
         };
@@ -531,6 +541,8 @@ impl VirtualFileSystem {
 
     /// Allocate an anonymous region of `len` bytes and return its base address.
     /// Unicorn already has the full 2 GB mapped, so we just bump the pointer.
+    /// Used for internal emulator allocations (thread stacks, FTS, etc.) that
+    /// are never returned to the guest heap.
     pub fn mmap_anon(&mut self, len: u32) -> EmulationResult<u32> {
         if len == 0 {
             return Err(EmulationError::MemoryError(
@@ -545,6 +557,78 @@ impl VirtualFileSystem {
             .checked_add(aligned_len)
             .ok_or_else(|| EmulationError::MemoryError("mmap: address space exhausted".into()))?;
         Ok(addr)
+    }
+
+    // ── Guest heap allocator (malloc / free / realloc) ────────────────────────
+
+    /// Allocate `size` bytes from the guest heap.
+    /// Uses a first-fit free list so freed blocks are reused, with adjacent
+    /// coalescing to prevent fragmentation.  Falls back to bump allocation.
+    pub fn heap_alloc(&mut self, size: u32) -> EmulationResult<u32> {
+        let aligned = (size.max(1) + 15) & !15;
+
+        // First-fit search in free list
+        if let Some(i) = self.free_list.iter().position(|&(_, s)| s >= aligned) {
+            let (addr, block_size) = self.free_list.remove(i);
+            let remainder = block_size - aligned;
+            if remainder >= 16 {
+                self.insert_free_block(addr + aligned, remainder);
+            }
+            self.alloc_sizes.insert(addr, aligned);
+            return Ok(addr);
+        }
+
+        // No suitable free block — bump allocate from mmap region
+        let addr = self.mmap_next;
+        self.mmap_next = self
+            .mmap_next
+            .checked_add(aligned)
+            .ok_or_else(|| EmulationError::MemoryError("heap: address space exhausted".into()))?;
+        self.alloc_sizes.insert(addr, aligned);
+        Ok(addr)
+    }
+
+    /// Return a previously heap_alloc'd block to the free list.
+    /// Silently ignores NULL and unrecognised pointers (double-free safety).
+    pub fn heap_free(&mut self, ptr: u32) {
+        if ptr == 0 {
+            return;
+        }
+        if let Some(size) = self.alloc_sizes.remove(&ptr) {
+            self.insert_free_block(ptr, size);
+        }
+    }
+
+    /// Look up the allocated size for a guest heap pointer (for realloc).
+    pub fn heap_block_size(&self, ptr: u32) -> Option<u32> {
+        self.alloc_sizes.get(&ptr).copied()
+    }
+
+    /// Insert `(addr, size)` into the sorted free list and coalesce with
+    /// any immediately adjacent free blocks.
+    fn insert_free_block(&mut self, addr: u32, size: u32) {
+        let pos = self.free_list.partition_point(|&(a, _)| a < addr);
+        self.free_list.insert(pos, (addr, size));
+
+        // Coalesce with next block
+        if pos + 1 < self.free_list.len() {
+            let (ca, cs) = self.free_list[pos];
+            let (na, ns) = self.free_list[pos + 1];
+            if ca + cs == na {
+                self.free_list[pos] = (ca, cs + ns);
+                self.free_list.remove(pos + 1);
+            }
+        }
+
+        // Coalesce with previous block
+        if pos > 0 {
+            let (pa, ps) = self.free_list[pos - 1];
+            let (ca, cs) = self.free_list[pos];
+            if pa + ps == ca {
+                self.free_list[pos - 1] = (pa, ps + cs);
+                self.free_list.remove(pos);
+            }
+        }
     }
 }
 

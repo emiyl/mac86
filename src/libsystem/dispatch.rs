@@ -561,26 +561,40 @@ fn dispatch(
 
         // ── Memory ───────────────────────────────────────────────────────────
         LibSym::Malloc => {
-            let addr = fs
-                .mmap_anon(if a0 == 0 { 4 } else { (a0 + 15) & !15 })
-                .unwrap_or(0);
+            let addr = fs.heap_alloc(a0).unwrap_or(0);
             DispatchOutcome::Ret(addr as u64)
         }
-        LibSym::Free => DispatchOutcome::Ret(0),
+        LibSym::Free => {
+            fs.heap_free(a0);
+            DispatchOutcome::Ret(0)
+        }
         LibSym::Calloc => {
-            let addr = fs
-                .mmap_anon((a0.saturating_mul(a1).max(4) + 15) & !15)
-                .unwrap_or(0);
+            let total = a0.saturating_mul(a1);
+            let addr = fs.heap_alloc(total).unwrap_or(0);
+            if addr != 0 && total > 0 {
+                // Memory from the free list may contain stale data — zero it.
+                let _ = emu.mem_write(addr as u64, &vec![0u8; total as usize]);
+            }
             DispatchOutcome::Ret(addr as u64)
         }
         LibSym::Realloc => {
-            let new = fs
-                .mmap_anon(if a1 == 0 { 4 } else { (a1 + 15) & !15 })
-                .unwrap_or(0);
-            if a0 != 0 && new != 0 {
-                let _ = emu.mem_write(new as u64, &read_bytes(emu, a0, a1 as usize));
+            if a0 == 0 {
+                // realloc(NULL, size) == malloc(size)
+                DispatchOutcome::Ret(fs.heap_alloc(a1).unwrap_or(0) as u64)
+            } else if a1 == 0 {
+                // realloc(ptr, 0) == free(ptr), return NULL
+                fs.heap_free(a0);
+                DispatchOutcome::Ret(0)
+            } else {
+                let new_addr = fs.heap_alloc(a1).unwrap_or(0);
+                if new_addr != 0 {
+                    let old_size = fs.heap_block_size(a0).unwrap_or(a1) as usize;
+                    let copy_len = old_size.min(a1 as usize);
+                    let _ = emu.mem_write(new_addr as u64, &read_bytes(emu, a0, copy_len));
+                    fs.heap_free(a0);
+                }
+                DispatchOutcome::Ret(new_addr as u64)
             }
-            DispatchOutcome::Ret(new as u64)
         }
 
         // ── stdio ─────────────────────────────────────────────────────────────
@@ -740,7 +754,7 @@ fn dispatch(
         LibSym::Strdup => {
             let mut b = read_cstr(emu, a0).into_bytes();
             b.push(0);
-            let addr = fs.mmap_anon((b.len() as u32 + 15) & !15).unwrap_or(0);
+            let addr = fs.heap_alloc(b.len() as u32).unwrap_or(0);
             if addr != 0 {
                 let _ = emu.mem_write(addr as u64, &b);
             }
