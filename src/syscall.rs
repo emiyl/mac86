@@ -1,7 +1,24 @@
 use crate::errors::{EmulationError, EmulationResult};
 use crate::filesystem::{FileStat, VirtualFileSystem};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use unicorn_engine::Unicorn;
+
+/// Set by the host SIGINT / SIGTERM handler; checked at every syscall.
+pub static STOP_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+/// Install host signal handlers that set STOP_REQUESTED.
+pub fn install_signal_handlers() {
+    use nix::sys::signal::{signal, Signal, SigHandler};
+    unsafe {
+        let _ = signal(Signal::SIGINT, SigHandler::Handler(sigint_handler));
+        let _ = signal(Signal::SIGTERM, SigHandler::Handler(sigint_handler));
+    }
+}
+
+extern "C" fn sigint_handler(_sig: libc::c_int) {
+    STOP_REQUESTED.store(true, Ordering::Relaxed);
+}
 
 /// Arguments to a syscall — register convention (EAX=num, EBX..EBP=args).
 #[derive(Debug, Clone)]
@@ -45,6 +62,12 @@ impl SyscallHandler {
         fs: &mut VirtualFileSystem,
         args: SyscallArgs,
     ) -> EmulationResult<(SyscallOutcome, u64)> {
+        // Check for host SIGINT / SIGTERM before every syscall.
+        if STOP_REQUESTED.load(Ordering::Relaxed) {
+            log::info!("Host signal received — stopping emulation");
+            return Ok((SyscallOutcome::Exit(130), 0));
+        }
+
         if self.trace {
             println!(
                 "[syscall] {} ({}, {}, {}, {}, {}, {})",
@@ -201,8 +224,21 @@ impl SyscallHandler {
                 Ok((SyscallOutcome::Continue, 0))
             }
             46 => {
-                // sigaction(sig, act, oact) — stub
-                log::debug!("sigaction({}, …)", args.arg0);
+                // sigaction(sig, act, oact)
+                // struct sigaction { sa_handler, sa_mask, sa_flags }
+                let sig = args.arg0;
+                let act_ptr = args.arg1;
+                log::debug!("sigaction({}, act=0x{:x})", sig, act_ptr);
+                if act_ptr != 0 {
+                    // sa_handler is the first field (u32 on i386)
+                    let mut h = [0u8; 4];
+                    let _ = emu.mem_read(act_ptr as u64, &mut h);
+                    let handler = u32::from_le_bytes(h);
+                    if handler > 1 {
+                        // > 1 means a real function pointer (SIG_DFL=0, SIG_IGN=1)
+                        fs.threads.signal_handlers.insert(sig, handler);
+                    }
+                }
                 Ok((SyscallOutcome::Continue, 0))
             }
             47 => {

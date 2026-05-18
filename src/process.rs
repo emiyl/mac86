@@ -229,6 +229,9 @@ impl Process {
         let cpu_state = self.cpu.dump_registers()?;
         info!("Initial CPU state: {}", cpu_state);
 
+        // Intercept host SIGINT / SIGTERM so Ctrl-C shuts down cleanly.
+        crate::syscall::install_signal_handlers();
+
         info!("Starting emulation");
         self.cpu.execute(0)?;
 

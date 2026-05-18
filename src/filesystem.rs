@@ -1,4 +1,5 @@
 use crate::errors::{EmulationError, EmulationResult};
+use crate::threads::ThreadTable;
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -26,6 +27,9 @@ pub struct VirtualFileSystem {
 
     /// Bump pointer for anonymous mmap allocations.
     mmap_next: u32,
+
+    /// Thread table (TIDs, TLS, once, signal handlers).
+    pub threads: ThreadTable,
 }
 
 #[derive(Debug, Clone)]
@@ -41,8 +45,9 @@ impl VirtualFileSystem {
             mounts: HashMap::new(),
             file_descriptors: HashMap::new(),
             next_fd: 3, // stdin, stdout, stderr are 0, 1, 2
-            heap_break: 0x1000_0000, // 256 MB — above any typical static binary
-            mmap_next: 0x2000_0000,  // 512 MB — anonymous mmap region
+            heap_break: 0x1000_0000,
+            mmap_next: 0x2000_0000,
+            threads: ThreadTable::new(),
         };
 
         // Mount standard file descriptors

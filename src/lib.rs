@@ -8,3 +8,4 @@ pub mod libsystem;
 pub mod memory;
 pub mod process;
 pub mod syscall;
+pub mod threads;

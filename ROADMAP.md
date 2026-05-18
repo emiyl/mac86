@@ -47,11 +47,23 @@
 - [ ] mprotect
 - [ ] Errno mapping (EAX = -errno on error, not just -1)
 
-## Phase 5: Threads & Signals
-- [ ] pthread_create / pthread_join (Unicorn multi-instance approach)
-- [ ] pthread_mutex_lock/unlock (host mutex passthrough)
-- [ ] Signal delivery (SIGTERM, SIGINT, SIGHUP)
-- [ ] setjmp / longjmp (already works via register save/restore)
+## Phase 5: Threads & Signals ✅
+- [x] pthread_create / pthread_join — eager cooperative model (context-switch via
+       register save/restore; thread runs at create time, join reads stored result)
+- [x] pthread_mutex_lock/unlock/trylock/init/destroy — no-ops (cooperative, no contention)
+- [x] pthread_rwlock_* — no-ops
+- [x] pthread_cond_wait/signal/broadcast/timedwait — no-ops
+- [x] pthread_attr_init/setdetachstate/setstacksize/destroy — no-ops
+- [x] pthread_once — executes init function exactly once (also uses sentinel mechanism)
+- [x] pthread_key_create/delete/getspecific/setspecific — global TLS table
+- [x] pthread_self — returns 1 (main thread)
+- [x] sigaction — stores guest handler address in thread table
+- [x] Host SIGINT / SIGTERM → STOP_REQUESTED atomic flag, checked each syscall
+- [x] setjmp / _setjmp / sigsetjmp — saves EBX/ESI/EDI/EBP/ESP/EIP to jmp_buf
+- [x] longjmp / _longjmp / siglongjmp — restores state and jumps back to setjmp site
+- [ ] Nested thread concurrency (current model is eager/sequential, not parallel)
+- [ ] Guest signal delivery (invoke registered handler in guest context)
+- [ ] pthread_cancel / pthread_testcancel
 
 ## Phase 6: Advanced Dynamic Linking
 - [ ] Multiple dylib loading (libm, libc++, CoreFoundation stubs)
