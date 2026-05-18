@@ -95,22 +95,37 @@ impl Process {
         Ok(())
     }
 
-    /// Build the initial stack.
+    /// Build the initial process stack.
     ///
-    /// If `ret_addr` is `Some(addr)` the stack starts with that return address
-    /// (direct-to-main call convention for LC_MAIN binaries).  If `None`, the
-    /// stack starts directly with `argc` (crt0 will push the return address
-    /// itself via `call _main`).
+    /// Two layouts depending on entry convention:
     ///
-    /// Layout (`ret_addr = None`, crt0 convention):
-    ///   ESP → [argc, argv*, envp*]
+    /// **`ret_addr = None` — crt0/crt1 flat startup stack (Darwin ABI)**
     ///
-    /// Layout (`ret_addr = Some(x)`, direct-to-main):
-    ///   ESP → [x (fake ret), argc, argv*, envp*]
+    /// ```text
+    /// ESP → argc
+    ///        argv[0]   (string pointer directly on the stack)
+    ///        argv[1]   …
+    ///        NULL      (argv sentinel)
+    ///        NULL      (envp sentinel)
+    ///        NULL      (apple[] sentinel)
+    /// ```
+    ///
+    /// crt1's `_start` computes `argv = leal 0x8(%ebp)` after `push $0;
+    /// mov %esp,%ebp`, giving the address of the `argv[0]` slot — i.e. a
+    /// correct `char**` with no extra indirection.
+    ///
+    /// **`ret_addr = Some(x)` — direct-to-`main()` (LC_MAIN)**
+    ///
+    /// ```text
+    /// ESP → x          (fake return address = exit trampoline)
+    ///        argc
+    ///        argv**    (pointer to pointer array at PTRARRAY_REGION)
+    ///        envp**
+    /// ```
     fn setup_stack(&mut self, args: &[String], ret_addr: Option<u32>) -> EmulationResult<u32> {
-        const STR_REGION: u32 = 0x7FFE0000;
-        const PTRARRAY_REGION: u32 = 0x7FFD0000;
-        const STACK_TOP: u32 = 0x7FFC0000;
+        const STR_REGION: u32 = 0x7FFE_0000;
+        const PTRARRAY_REGION: u32 = 0x7FFD_0000;
+        const STACK_TOP: u32 = 0x7FFC_0000;
 
         let argc = args.len() as u32;
 
@@ -125,37 +140,55 @@ impl Process {
             str_ptr += bytes.len() as u32;
         }
 
-        // Write argv pointer array then envp null sentinel.
-        let mut arr_ptr = PTRARRAY_REGION;
-        for &p in &argv_ptrs {
-            self.cpu.write_memory(arr_ptr, &p.to_le_bytes())?;
-            arr_ptr += 4;
-        }
-        self.cpu.write_memory(arr_ptr, &0u32.to_le_bytes())?; // argv null
-        arr_ptr += 4;
-        let envp_array_addr = arr_ptr;
-        self.cpu.write_memory(arr_ptr, &0u32.to_le_bytes())?; // envp null
+        let esp = if let Some(ret) = ret_addr {
+            // LC_MAIN: put argv pointers in a separate array, build cdecl frame.
+            let mut arr = PTRARRAY_REGION;
+            for &p in &argv_ptrs {
+                self.cpu.write_memory(arr, &p.to_le_bytes())?;
+                arr += 4;
+            }
+            self.cpu.write_memory(arr, &0u32.to_le_bytes())?; // argv null
+            arr += 4;
+            let envp_addr = arr;
+            self.cpu.write_memory(arr, &0u32.to_le_bytes())?; // envp null
 
-        // Build the frame; align ESP to 16 bytes.
-        let frame_words: u32 = if ret_addr.is_some() { 4 } else { 3 };
-        let esp = (STACK_TOP - frame_words * 4) & !0xF;
-
-        let mut ptr = esp;
-        if let Some(ra) = ret_addr {
-            self.cpu.write_memory(ptr, &ra.to_le_bytes())?;
+            let esp = (STACK_TOP - 16) & !0xF;
+            self.cpu.write_memory(esp, &ret.to_le_bytes())?;
+            self.cpu.write_memory(esp + 4, &argc.to_le_bytes())?;
+            self.cpu
+                .write_memory(esp + 8, &PTRARRAY_REGION.to_le_bytes())?;
+            self.cpu.write_memory(esp + 12, &envp_addr.to_le_bytes())?;
+            esp
+        } else {
+            // crt0/crt1: flat startup stack — argv pointers laid out directly.
+            // Words: argc(1) + argv[0..n](n) + argv_null(1) + envp_null(1) + apple_null(1)
+            let words = argc + 4;
+            let esp = (STACK_TOP - words * 4) & !0xF;
+            let mut ptr = esp;
+            self.cpu.write_memory(ptr, &argc.to_le_bytes())?;
             ptr += 4;
-        }
-        self.cpu.write_memory(ptr, &argc.to_le_bytes())?;
-        ptr += 4;
-        self.cpu.write_memory(ptr, &PTRARRAY_REGION.to_le_bytes())?;
-        ptr += 4;
-        self.cpu.write_memory(ptr, &envp_array_addr.to_le_bytes())?;
+            for &p in &argv_ptrs {
+                self.cpu.write_memory(ptr, &p.to_le_bytes())?;
+                ptr += 4;
+            }
+            self.cpu.write_memory(ptr, &0u32.to_le_bytes())?;
+            ptr += 4; // argv null
+            self.cpu.write_memory(ptr, &0u32.to_le_bytes())?;
+            ptr += 4; // envp null
+            self.cpu.write_memory(ptr, &0u32.to_le_bytes())?; // apple null
+            esp
+        };
 
         info!("Stack setup complete: ESP=0x{:x}", esp);
         Ok(esp)
     }
 
-    pub fn execute(&mut self, args: &[String]) -> EmulationResult<()> {
+    pub fn execute(&mut self, user_args: &[String]) -> EmulationResult<()> {
+        // argv[0] is the binary name; user_args are argv[1..].
+        let mut args: Vec<String> = Vec::with_capacity(user_args.len() + 1);
+        args.push(self.binary.name.clone());
+        args.extend_from_slice(user_args);
+
         info!(
             "Executing {} (entry: 0x{:x}, is_main={}, dynamic={})",
             self.binary.name,
@@ -211,13 +244,17 @@ impl Process {
                 let _ = self.cpu.write_memory(slot, &taddr.to_le_bytes());
             }
 
-            if self.binary.entry_is_main { Some(exit_addr) } else { None }
+            if self.binary.entry_is_main {
+                Some(exit_addr)
+            } else {
+                None
+            }
         } else {
             None
         };
 
         // ── stack ─────────────────────────────────────────────────────────────
-        let stack_ptr = self.setup_stack(args, direct_ret_addr)?;
+        let stack_ptr = self.setup_stack(&args, direct_ret_addr)?;
 
         // ── CPU start ─────────────────────────────────────────────────────────
         self.cpu

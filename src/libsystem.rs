@@ -23,7 +23,7 @@ pub const SIGNAL_RETURN_ADDR: u32 = TRAMPOLINE_BASE + 8;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum LibSym {
     // I/O
-    Write, Read, Open, Close,
+    Write, Writev, Read, Open, Close,
     // Process
     Exit, Abort,
     // Memory
@@ -83,7 +83,8 @@ fn base_name(raw: &str) -> &str {
 
 pub fn known_symbol(name: &str) -> Option<LibSym> {
     match base_name(name) {
-        "write"|"write_nocancel"|"pwrite"      => Some(LibSym::Write),
+        "write"|"write_nocancel"|"pwrite"        => Some(LibSym::Write),
+        "writev"|"writev_nocancel"              => Some(LibSym::Writev),
         "read" |"read_nocancel" |"pread"       => Some(LibSym::Read),
         "open" |"open_nocancel"                => Some(LibSym::Open),
         "close"|"close_nocancel"               => Some(LibSym::Close),
@@ -352,6 +353,19 @@ fn dispatch(
         LibSym::Write => {
             let data = read_bytes(emu, a1, a2 as usize);
             DispatchOutcome::Ret(fs.write_bytes(a0, &data).unwrap_or(0) as u64)
+        }
+        LibSym::Writev => {
+            // writev(fd, iov*, iovcnt)
+            // struct iovec { void *iov_base; size_t iov_len; } = 8 bytes on i386
+            let mut total: u64 = 0;
+            for i in 0..a2 as usize {
+                let base = read_u32(emu, a1 + (i as u32) * 8);
+                let len  = read_u32(emu, a1 + (i as u32) * 8 + 4) as usize;
+                if len == 0 { continue; }
+                let data = read_bytes(emu, base, len);
+                total += fs.write_bytes(a0, &data).unwrap_or(0) as u64;
+            }
+            DispatchOutcome::Ret(total)
         }
         LibSym::Read => {
             let data = fs.read_bytes(a0, a2 as usize).unwrap_or_default();
