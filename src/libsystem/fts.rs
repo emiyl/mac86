@@ -13,7 +13,6 @@ pub const FTS_SKIP: u32 = 4; // fts_set option: skip this directory
 
 #[derive(Clone)]
 pub struct FtsHandle {
-    pub root_path: PathBuf,
     /// Pre-generated entries: (host_path, fts_info, level)
     pub entries: Vec<(PathBuf, u32, u16)>,
     pub index: usize,
@@ -79,9 +78,7 @@ pub fn allocate_fts_handle(path_str: &str) -> Option<u32> {
         entries.push((closed, FTS_DP, closed_depth));
     }
 
-    let root_path = path.to_path_buf();
     let handle = FtsHandle {
-        root_path,
         entries,
         index: 0,
         current_level: 0,

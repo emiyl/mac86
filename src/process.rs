@@ -6,7 +6,6 @@ use crate::errors::EmulationResult;
 use crate::filesystem::VirtualFileSystem;
 use crate::libsystem;
 use crate::syscall::SyscallHandler;
-use log::debug;
 use log::info;
 use std::cell::RefCell;
 use std::rc::Rc;

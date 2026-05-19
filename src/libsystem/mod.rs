@@ -8,6 +8,7 @@
 /// |  1   | 0x5000_0004  | ThreadSentinel — thread/once fn return |
 /// |  2   | 0x5000_0008  | SignalReturn — signal handler return |
 /// |  3+  | 0x5000_000C+ | Imported symbols (DyldBindings) |
+#[allow(non_snake_case)]
 mod CoreFoundation;
 mod cf_handle_table;
 mod dispatch;
