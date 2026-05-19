@@ -57,15 +57,32 @@ pub(super) fn do_format(emu: &Unicorn<'_, ()>, fmt: &str, vararg_esp: &mut u32) 
         if i >= bytes.len() {
             break;
         }
-        let zero_pad = bytes[i] == b'0';
-        if zero_pad {
-            i += 1;
+        // Parse flags: -, 0, +, space, #  (may appear in any order)
+        let mut left_align = false;
+        let mut zero_pad = false;
+        loop {
+            match bytes.get(i) {
+                Some(b'-') => {
+                    left_align = true;
+                    i += 1;
+                }
+                Some(b'0') => {
+                    zero_pad = true;
+                    i += 1;
+                }
+                Some(b'+') | Some(b' ') | Some(b'#') => {
+                    i += 1;
+                }
+                _ => break,
+            }
         }
+        // Parse width
         let mut width = 0usize;
         while i < bytes.len() && bytes[i].is_ascii_digit() {
             width = width * 10 + (bytes[i] - b'0') as usize;
             i += 1;
         }
+        // Skip length modifiers
         while i < bytes.len() && matches!(bytes[i], b'l' | b'h' | b'z' | b'j' | b't') {
             i += 1;
         }
@@ -83,37 +100,14 @@ pub(super) fn do_format(emu: &Unicorn<'_, ()>, fmt: &str, vararg_esp: &mut u32) 
         }
         let arg = read_u32(emu, *vararg_esp);
         *vararg_esp += 4;
+        let right = !left_align;
+        let pad_char = if zero_pad { '0' } else { ' ' };
         let frag = match spec {
-            b'd' | b'i' => padf(
-                format!("{}", arg as i32),
-                width,
-                if zero_pad { '0' } else { ' ' },
-                true,
-            ),
-            b'u' => padf(
-                format!("{}", arg),
-                width,
-                if zero_pad { '0' } else { ' ' },
-                true,
-            ),
-            b'x' => padf(
-                format!("{:x}", arg),
-                width,
-                if zero_pad { '0' } else { ' ' },
-                true,
-            ),
-            b'X' => padf(
-                format!("{:X}", arg),
-                width,
-                if zero_pad { '0' } else { ' ' },
-                true,
-            ),
-            b'o' => padf(
-                format!("{:o}", arg),
-                width,
-                if zero_pad { '0' } else { ' ' },
-                true,
-            ),
+            b'd' | b'i' => padf(format!("{}", arg as i32), width, pad_char, right),
+            b'u' => padf(format!("{}", arg), width, pad_char, right),
+            b'x' => padf(format!("{:x}", arg), width, pad_char, right),
+            b'X' => padf(format!("{:X}", arg), width, pad_char, right),
+            b'o' => padf(format!("{:o}", arg), width, pad_char, right),
             b'p' => format!("0x{:x}", arg),
             b's' => {
                 let s = if arg == 0 {
@@ -121,7 +115,7 @@ pub(super) fn do_format(emu: &Unicorn<'_, ()>, fmt: &str, vararg_esp: &mut u32) 
                 } else {
                     read_cstr(emu, arg)
                 };
-                padf(s, width, ' ', false)
+                padf(s, width, ' ', right)
             }
             b'c' => (arg as u8 as char).to_string(),
             _ => {
