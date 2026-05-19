@@ -17,6 +17,10 @@ struct Args {
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     args: Vec<String>,
 
+    /// Enable debug logging for libSystem calls and other emulator internals
+    #[arg(short, long)]
+    debug: bool,
+
     /// Enable verbose logging
     #[arg(short, long)]
     verbose: bool,
@@ -38,11 +42,11 @@ fn main() -> Result<()> {
     let args = Args::parse();
 
     // Initialize logging
-    if args.verbose {
+    if args.debug {
         env_logger::Builder::from_default_env()
             .filter_level(log::LevelFilter::Debug)
             .init();
-    } else {
+    } else if args.verbose {
         env_logger::Builder::from_default_env()
             .filter_level(log::LevelFilter::Info)
             .init();
