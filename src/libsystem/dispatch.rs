@@ -1,3 +1,4 @@
+use core::ffi::c_void;
 use std::path;
 use unicorn_engine::{RegisterX86, Unicorn};
 
@@ -9,10 +10,12 @@ use super::math::{read_f32, read_f64, write_f64_st0};
 use super::mem::{read_bytes, read_cstr, read_cstr_max, read_u32, write_u32};
 use super::printf::{fmt_printf, fmt_printf_str, format_str};
 use super::symbols::LibSym;
+use super::cf_handle_table::{cf_apply_pop, cf_apply_push, cf_arg, cf_arg_mut, cf_intern, cf_result};
 use super::trampoline::{
-    ERRNO_STORAGE_ADDR, FDOPEN_FILE_BASE, OPTARG_STORAGE_ADDR, OPTIND_STORAGE_ADDR,
-    STDERR_FILE_PTR, STDIN_FILE_PTR, STDOUT_FILE_PTR, THREAD_SENTINEL_ADDR,
+    CF_APPLY_SENTINEL_ADDR, ERRNO_STORAGE_ADDR, FDOPEN_FILE_BASE, OPTARG_STORAGE_ADDR,
+    OPTIND_STORAGE_ADDR, STDERR_FILE_PTR, STDIN_FILE_PTR, STDOUT_FILE_PTR, THREAD_SENTINEL_ADDR,
 };
+use super::CoreFoundation::*;
 
 pub enum DispatchOutcome {
     Ret(u64),
@@ -1267,6 +1270,199 @@ fn dispatch(
             DispatchOutcome::Ret(0)
         }
 
+        // ── CoreFoundation ────────────────────────────────────────────────────
+        //
+        // CF objects are 64-bit host pointers; i386 guests can only hold 32-bit
+        // values.  A thread-local handle table (cf_handle_table) maps between
+        // the two.  cf_arg/cf_arg_mut translate guest handles → host pointers;
+        // cf_intern/cf_result translate host pointers → guest handles.
+        //
+        // CFRange is a struct { isize location; isize length } passed by value
+        // on i386 (2 × 4 bytes).  The calling convention for a function like
+        //   CFArrayApplyFunction(array, range, applier, context)
+        // is therefore:
+        //   [esp+4]  = array
+        //   [esp+8]  = range.location
+        //   [esp+12] = range.length
+        //   [esp+16] = applier
+        //   [esp+20] = context
+        // Read beyond a3 directly from the stack where needed.
+
+        LibSym::CFAbsoluteTimeGetCurrent => {
+            let value = unsafe { CFAbsoluteTimeGetCurrent() };
+            write_f64_st0(emu, value);
+            DispatchOutcome::Ret(0)
+        }
+        LibSym::CFArrayAppendArray => {
+            // CFArrayAppendArray(dest, src, srcRange)
+            // [esp+4]=dest  [esp+8]=src  [esp+12]=range.location  [esp+16]=range.length
+            let dest = cf_arg_mut(a0) as CFMutableArrayRef;
+            let src = cf_arg(a1) as CFArrayRef;
+            let range = CFRange {
+                location: a2 as i32 as isize,
+                length: a3 as i32 as isize,
+            };
+            unsafe { CFArrayAppendArray(dest, src, range); }
+            DispatchOutcome::Ret(0)
+        }
+        LibSym::CFArrayAppendValue => {
+            // CFArrayAppendValue(array, value)
+            let array = cf_arg_mut(a0) as CFMutableArrayRef;
+            let value = cf_arg(a1);
+            unsafe { CFArrayAppendValue(array, value); }
+            DispatchOutcome::Ret(0)
+        }
+        LibSym::CFArrayApplyFunction => {
+            // CFArrayApplyFunction(array, range, applier, context)
+            // [esp+4]=array [esp+8]=range.loc [esp+12]=range.len [esp+16]=applier [esp+20]=context
+            let array = cf_arg(a0) as CFArrayRef;
+            let applier_addr = a3; // NOT a1 — a1 is range.location
+            let context = read_u32(emu, esp + 20);
+            let count = unsafe { CFArrayGetCount(array) } as u32;
+            if count == 0 || applier_addr == 0 {
+                return DispatchOutcome::Ret(0);
+            }
+            // Collect element handles in forward order, push remaining in reverse
+            // so that cf_apply_pop() yields them in forward order.
+            let elem0 = cf_result(unsafe { CFArrayGetValueAtIndex(array, 0) });
+            for i in (1..count).rev() {
+                let v = cf_result(unsafe { CFArrayGetValueAtIndex(array, i as isize) });
+                cf_apply_push(applier_addr, v, context);
+            }
+            // Save caller context (same mechanism as pthread_create).
+            fs.threads.continuations.push(ThreadContinuation {
+                ret_addr,
+                tid: 0,
+                ebx: emu.reg_read(RegisterX86::EBX).unwrap_or(0) as u32,
+                ecx: emu.reg_read(RegisterX86::ECX).unwrap_or(0) as u32,
+                edx: emu.reg_read(RegisterX86::EDX).unwrap_or(0) as u32,
+                esi: emu.reg_read(RegisterX86::ESI).unwrap_or(0) as u32,
+                edi: emu.reg_read(RegisterX86::EDI).unwrap_or(0) as u32,
+                ebp: emu.reg_read(RegisterX86::EBP).unwrap_or(0) as u32,
+                esp,
+            });
+            // Set up the first applier call.
+            // Stack frame: [esp-12] = CF_APPLY_SENTINEL_ADDR, [esp-8] = elem0, [esp-4] = context
+            let tsp = esp.wrapping_sub(12);
+            let _ = emu.mem_write(tsp as u64, &CF_APPLY_SENTINEL_ADDR.to_le_bytes());
+            let _ = emu.mem_write((tsp + 4) as u64, &elem0.to_le_bytes());
+            let _ = emu.mem_write((tsp + 8) as u64, &context.to_le_bytes());
+            let _ = emu.reg_write(RegisterX86::ESP, tsp as u64);
+            let _ = emu.set_pc(applier_addr as u64);
+            DispatchOutcome::StateSet
+        }
+        LibSym::CfApplySentinel => {
+            // The i386 applier returned here via `ret`, which already popped the
+            // return address, so ESP = previous_tsp + 4 = original_esp - 8.
+            // We reuse the same 12-byte window for each subsequent call.
+            if let Some((applier_addr, elem, context)) = cf_apply_pop() {
+                let cur_esp = esp; // esp after applier's `ret`
+                let tsp = cur_esp.wrapping_sub(4);
+                let _ = emu.mem_write(tsp as u64, &CF_APPLY_SENTINEL_ADDR.to_le_bytes());
+                let _ = emu.mem_write((tsp + 4) as u64, &elem.to_le_bytes());
+                let _ = emu.mem_write((tsp + 8) as u64, &context.to_le_bytes());
+                let _ = emu.reg_write(RegisterX86::ESP, tsp as u64);
+                let _ = emu.set_pc(applier_addr as u64);
+                DispatchOutcome::StateSet
+            } else if let Some(cont) = fs.threads.continuations.pop() {
+                // All elements processed; restore caller.
+                let _ = emu.reg_write(RegisterX86::EBX, cont.ebx as u64);
+                let _ = emu.reg_write(RegisterX86::ECX, cont.ecx as u64);
+                let _ = emu.reg_write(RegisterX86::EDX, cont.edx as u64);
+                let _ = emu.reg_write(RegisterX86::ESI, cont.esi as u64);
+                let _ = emu.reg_write(RegisterX86::EDI, cont.edi as u64);
+                let _ = emu.reg_write(RegisterX86::EBP, cont.ebp as u64);
+                let _ = emu.reg_write(RegisterX86::ESP, (cont.esp + 4) as u64);
+                let _ = emu.reg_write(RegisterX86::EAX, 0u64);
+                let _ = emu.set_pc(cont.ret_addr as u64);
+                DispatchOutcome::StateSet
+            } else {
+                DispatchOutcome::Exit
+            }
+        }
+        LibSym::CFArrayGetCount => {
+            let array = cf_arg(a0) as CFArrayRef;
+            let count = unsafe { CFArrayGetCount(array) };
+            DispatchOutcome::Ret(count as u64)
+        }
+        LibSym::CFArrayContainsValue => {
+            // CFArrayContainsValue(array, range, value)
+            // [esp+4]=array [esp+8]=range.loc [esp+12]=range.len [esp+16]=value
+            let array = cf_arg(a0) as CFArrayRef;
+            let value = cf_arg(a3);
+            let contains = unsafe {
+                let count = CFArrayGetCount(array);
+                CFArrayContainsValue(array, CFRange { location: 0, length: count }, value)
+            };
+            DispatchOutcome::Ret(contains as u64)
+        }
+        LibSym::CFArrayCreateCopy => {
+            let allocator = cf_arg(a0) as CFAllocatorRef;
+            let array = cf_arg(a1) as CFArrayRef;
+            let copy = unsafe { CFArrayCreateCopy(allocator, array) };
+            DispatchOutcome::Ret(cf_intern(copy) as u64)
+        }
+        LibSym::CFArrayCreateMutable => {
+            // CFArrayCreateMutable(allocator, capacity, callbacks)
+            // If callbacks != 0 we assume kCFTypeArrayCallBacks (the only sensible
+            // non-null value an i386 binary can pass).
+            let allocator = cf_arg(a0) as CFAllocatorRef;
+            let capacity = a1 as isize;
+            let callbacks: *const CFArrayCallBacks = if a2 == 0 {
+                std::ptr::null()
+            } else {
+                std::ptr::addr_of!(kCFTypeArrayCallBacks)
+            };
+            let array = unsafe { CFArrayCreateMutable(allocator, capacity, callbacks as *const c_void) };
+            DispatchOutcome::Ret(cf_intern(array) as u64)
+        }
+        LibSym::CFArrayCreateMutableCopy => {
+            // CFArrayCreateMutableCopy(allocator, capacity, theArray)
+            // a0=allocator  a1=capacity (CFIndex)  a2=theArray
+            let allocator = cf_arg(a0) as CFAllocatorRef;
+            let capacity = a1 as isize;
+            let array = cf_arg(a2) as CFArrayRef;
+            let copy = unsafe { CFArrayCreateMutableCopy(allocator, capacity, array) };
+            DispatchOutcome::Ret(cf_intern(copy) as u64)
+        }
+        LibSym::CFArrayGetTypeID => {
+            let type_id = unsafe { CFArrayGetTypeID() };
+            DispatchOutcome::Ret(type_id)
+        }
+        LibSym::CFArrayGetValueAtIndex => {
+            let array = cf_arg(a0) as CFArrayRef;
+            let index = a1 as isize;
+            let value = unsafe { CFArrayGetValueAtIndex(array, index) };
+            DispatchOutcome::Ret(cf_result(value) as u64)
+        }
+        LibSym::CFArrayInsertValueAtIndex => {
+            let array = cf_arg_mut(a0) as CFMutableArrayRef;
+            let index = a1 as isize;
+            let value = cf_arg(a2);
+            unsafe { CFArrayInsertValueAtIndex(array, index, value); }
+            DispatchOutcome::Ret(0)
+        }
+        LibSym::CFArrayRemoveAllValues => {
+            let array = cf_arg_mut(a0) as CFMutableArrayRef;
+            unsafe { CFArrayRemoveAllValues(array); }
+            DispatchOutcome::Ret(0)
+        }
+        LibSym::CFArrayRemoveValueAtIndex => {
+            let array = cf_arg_mut(a0) as CFMutableArrayRef;
+            let index = a1 as isize;
+            unsafe { CFArrayRemoveValueAtIndex(array, index); }
+            DispatchOutcome::Ret(0)
+        }
+        LibSym::CFArraySortValues => {
+            // CFArraySortValues with an i386 comparator callback cannot be forwarded
+            // to the host CF (the callback is emulated x86 code, not native arm64).
+            // Implementing a full sort with emulated comparator calls requires the
+            // same continuation machinery as CFArrayApplyFunction but with an
+            // indeterminate call count — not implemented yet.
+            log::warn!("CFArraySortValues: sort with emulated comparator not implemented; array left unsorted");
+            DispatchOutcome::Ret(0)
+        }
+
         // Simple implementation for the legacy ___maskrune helper.  Many
         // binaries call this with a character and a class mask (e.g. 0x4000
         // for digit).  Implement only the digit mask used by coreutils so
@@ -1287,5 +1483,17 @@ fn dispatch(
         }
 
         LibSym::Stub0 => DispatchOutcome::Ret(0),
+
+        _ => {
+            log::warn!(
+                "unhandled library call: {:?}({:#x}, {:#x}, {:#x}, {:#x})",
+                sym,
+                a0,
+                a1,
+                a2,
+                a3
+            );
+            DispatchOutcome::Ret(0)
+        }
     }
 }

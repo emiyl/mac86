@@ -7,6 +7,7 @@ use super::symbols::{known_data_symbol, known_symbol, LibSym};
 pub const TRAMPOLINE_BASE: u32 = 0x5000_0000;
 pub const THREAD_SENTINEL_ADDR: u32 = TRAMPOLINE_BASE + 4;
 pub const SIGNAL_RETURN_ADDR: u32 = TRAMPOLINE_BASE + 8;
+pub const CF_APPLY_SENTINEL_ADDR: u32 = TRAMPOLINE_BASE + 12;
 pub const OPTIND_STORAGE_ADDR: u32 = 0x5000_F000;
 pub const OPTARG_STORAGE_ADDR: u32 = 0x5000_F004;
 pub const ERRNO_STORAGE_ADDR: u32 = 0x5000_F008;
@@ -46,8 +47,9 @@ impl Trampoline {
         sym_to_addr.insert(LibSym::ThreadSentinel, THREAD_SENTINEL_ADDR);
         dispatch.insert(SIGNAL_RETURN_ADDR, LibSym::SignalReturn);
         sym_to_addr.insert(LibSym::SignalReturn, SIGNAL_RETURN_ADDR);
+        dispatch.insert(CF_APPLY_SENTINEL_ADDR, LibSym::CfApplySentinel);
 
-        let mut slot = 3u32;
+        let mut slot = 4u32;
         for imp in &bindings.imports {
             if let Some(data_addr) = known_data_symbol(&imp.name) {
                 name_to_addr.insert(imp.name.clone(), data_addr);

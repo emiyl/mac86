@@ -21,6 +21,7 @@ mkdir -p "$BUILD_DIR"
 clang -arch i386 \
     -isysroot "$SDK_PATH" \
     -mmacosx-version-min=10.6 \
+    -Wl,-undefined,dynamic_lookup \
     "$SRC_PATH" \
     -o "$OUT_PATH"
 
