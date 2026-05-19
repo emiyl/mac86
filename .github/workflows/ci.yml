@@ -13,7 +13,7 @@ jobs:
       - name: Install system deps
         run: |
           brew update
-          brew install libunicorn pkg-config
+          brew install unicorn pkg-config
 
       - name: Install Rust
         uses: actions-rs/toolchain@v1
