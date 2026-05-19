@@ -43,6 +43,21 @@ pub(super) fn format_str(
     (text, n)
 }
 
+fn next32(emu: &Unicorn<'_, ()>, esp: &mut u32) -> u32 {
+    let v = read_u32(emu, *esp);
+    *esp += 4;
+    v
+}
+
+fn next64(emu: &Unicorn<'_, ()>, esp: &mut u32) -> u64 {
+    // i386 cdecl pushes the low word first, so it lands at the higher address.
+    // The high word is pushed last and sits at the lower address ([esp]).
+    let hi = read_u32(emu, *esp) as u64;
+    let lo = read_u32(emu, *esp + 4) as u64;
+    *esp += 8;
+    (hi << 32) | lo
+}
+
 pub(super) fn do_format(emu: &Unicorn<'_, ()>, fmt: &str, vararg_esp: &mut u32) -> String {
     let mut out = String::with_capacity(fmt.len() + 16);
     let bytes = fmt.as_bytes();
@@ -57,71 +72,123 @@ pub(super) fn do_format(emu: &Unicorn<'_, ()>, fmt: &str, vararg_esp: &mut u32) 
         if i >= bytes.len() {
             break;
         }
-        // Parse flags: -, 0, +, space, #  (may appear in any order)
+
+        // ── Flags ─────────────────────────────────────────────────────────
         let mut left_align = false;
         let mut zero_pad = false;
         loop {
             match bytes.get(i) {
-                Some(b'-') => {
-                    left_align = true;
-                    i += 1;
-                }
-                Some(b'0') => {
-                    zero_pad = true;
-                    i += 1;
-                }
-                Some(b'+') | Some(b' ') | Some(b'#') => {
-                    i += 1;
-                }
+                Some(b'-') => { left_align = true; i += 1; }
+                Some(b'0') => { zero_pad = true;   i += 1; }
+                Some(b'+') | Some(b' ') | Some(b'#') => { i += 1; }
                 _ => break,
             }
         }
-        // Parse width
+
+        // ── Width  (literal digits, or * = next arg) ───────────────────────
         let mut width = 0usize;
-        while i < bytes.len() && bytes[i].is_ascii_digit() {
-            width = width * 10 + (bytes[i] - b'0') as usize;
+        if bytes.get(i) == Some(&b'*') {
+            let w = next32(emu, vararg_esp) as i32;
+            if w < 0 { left_align = true; width = (-w) as usize; }
+            else      { width = w as usize; }
             i += 1;
+        } else {
+            while i < bytes.len() && bytes[i].is_ascii_digit() {
+                width = width * 10 + (bytes[i] - b'0') as usize;
+                i += 1;
+            }
         }
-        // Skip length modifiers
-        while i < bytes.len() && matches!(bytes[i], b'l' | b'h' | b'z' | b'j' | b't') {
+
+        // ── Precision  (.digits or .*)  ────────────────────────────────────
+        // We don't use precision for formatting yet; just consume it.
+        if bytes.get(i) == Some(&b'.') {
             i += 1;
+            if bytes.get(i) == Some(&b'*') {
+                next32(emu, vararg_esp);
+                i += 1;
+            } else {
+                while i < bytes.len() && bytes[i].is_ascii_digit() { i += 1; }
+            }
         }
-        if i >= bytes.len() {
-            break;
+
+        // ── Length modifiers ───────────────────────────────────────────────
+        // On i386: long = 4 bytes, long long / intmax_t / quad = 8 bytes.
+        let mut wide = false; // true → read 8 bytes from stack
+        let mut l_count = 0u8;
+        loop {
+            match bytes.get(i) {
+                Some(b'l') => { l_count += 1; if l_count >= 2 { wide = true; } i += 1; }
+                Some(b'q') => { wide = true; i += 1; } // BSD %qu / %qd
+                Some(b'j') => { wide = true; i += 1; } // intmax_t (64-bit on i386)
+                Some(b'h') | Some(b'z') | Some(b't') => { i += 1; }
+                _ => break,
+            }
         }
+
+        if i >= bytes.len() { break; }
         let spec = bytes[i];
         i += 1;
-        if spec == b'%' {
-            out.push('%');
-            continue;
-        }
-        if spec == b'n' {
-            continue;
-        }
-        let arg = read_u32(emu, *vararg_esp);
-        *vararg_esp += 4;
-        let right = !left_align;
+
+        if spec == b'%' { out.push('%'); continue; }
+        if spec == b'n' { next32(emu, vararg_esp); continue; }
+
+        let right    = !left_align;
         let pad_char = if zero_pad { '0' } else { ' ' };
-        let frag = match spec {
-            b'd' | b'i' => padf(format!("{}", arg as i32), width, pad_char, right),
-            b'u' => padf(format!("{}", arg), width, pad_char, right),
-            b'x' => padf(format!("{:x}", arg), width, pad_char, right),
-            b'X' => padf(format!("{:X}", arg), width, pad_char, right),
-            b'o' => padf(format!("{:o}", arg), width, pad_char, right),
-            b'p' => format!("0x{:x}", arg),
-            b's' => {
-                let s = if arg == 0 {
-                    "(null)".to_string()
+
+        let frag: String = match spec {
+            b'd' | b'i' => {
+                let s = if wide {
+                    format!("{}", next64(emu, vararg_esp) as i64)
                 } else {
-                    read_cstr(emu, arg)
+                    format!("{}", next32(emu, vararg_esp) as i32)
                 };
+                padf(s, width, pad_char, right)
+            }
+            b'u' => {
+                let s = if wide {
+                    format!("{}", next64(emu, vararg_esp))
+                } else {
+                    format!("{}", next32(emu, vararg_esp))
+                };
+                padf(s, width, pad_char, right)
+            }
+            b'x' => {
+                let s = if wide {
+                    format!("{:x}", next64(emu, vararg_esp))
+                } else {
+                    format!("{:x}", next32(emu, vararg_esp))
+                };
+                padf(s, width, pad_char, right)
+            }
+            b'X' => {
+                let s = if wide {
+                    format!("{:X}", next64(emu, vararg_esp))
+                } else {
+                    format!("{:X}", next32(emu, vararg_esp))
+                };
+                padf(s, width, pad_char, right)
+            }
+            b'o' => {
+                let s = if wide {
+                    format!("{:o}", next64(emu, vararg_esp))
+                } else {
+                    format!("{:o}", next32(emu, vararg_esp))
+                };
+                padf(s, width, pad_char, right)
+            }
+            b'p' => format!("0x{:x}", next32(emu, vararg_esp)),
+            b's' => {
+                let ptr = next32(emu, vararg_esp);
+                let s = if ptr == 0 { "(null)".to_string() } else { read_cstr(emu, ptr) };
                 padf(s, width, ' ', right)
             }
-            b'c' => (arg as u8 as char).to_string(),
-            _ => {
-                *vararg_esp -= 4;
-                format!("%{}", spec as char)
+            b'c' => (next32(emu, vararg_esp) as u8 as char).to_string(),
+            b'f' | b'e' | b'E' | b'g' | b'G' => {
+                // double is always 8 bytes on i386 stack (promoted from float)
+                let bits = next64(emu, vararg_esp);
+                format!("{}", f64::from_bits(bits))
             }
+            _ => format!("%{}", spec as char),
         };
         out.push_str(&frag);
     }
