@@ -10,7 +10,7 @@
 /// |  3+  | 0x5000_000C+ | Imported symbols (DyldBindings) |
 #[allow(non_snake_case)]
 mod CoreFoundation;
-mod cf_handle_table;
+mod host_handle_table;
 mod dispatch;
 mod fts;
 mod math;
