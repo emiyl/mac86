@@ -1453,6 +1453,36 @@ fn dispatch(
             unsafe { CFArrayRemoveValueAtIndex(array, index); }
             DispatchOutcome::Ret(0)
         }
+        LibSym::CFNumberCreate => {
+            // CFNumberCreate(allocator, type, valuePtr)
+            // valuePtr is a guest address pointing to the numeric value.
+            // We only need to support int-sized types for now; read 4 bytes.
+            let allocator = host_arg(a0) as CFAllocatorRef;
+            let num_type = a1 as isize;
+            let value_i32 = read_u32(emu, a2) as i32;
+            let num = unsafe {
+                CFNumberCreate(allocator, num_type, &value_i32 as *const i32 as *const c_void)
+            };
+            DispatchOutcome::Ret(host_intern(num) as u64)
+        }
+        LibSym::CFNumberGetTypeID => {
+            let type_id = unsafe { CFNumberGetTypeID() };
+            DispatchOutcome::Ret(type_id)
+        }
+        LibSym::CFNumberGetValue => {
+            // CFNumberGetValue(number, type, valuePtr)
+            // valuePtr is a guest address to write the result into.
+            let number = host_arg(a0) as CFNumberRef;
+            let num_type = a1 as isize;
+            let value_ptr = a2;
+            let mut value_i32: i32 = 0;
+            let ok = unsafe {
+                CFNumberGetValue(number, num_type, &mut value_i32 as *mut i32 as *mut c_void)
+            };
+            write_u32(emu, value_ptr, value_i32 as u32);
+            DispatchOutcome::Ret(ok as u64)
+        }
+
         LibSym::CFArraySortValues => {
             // CFArraySortValues with an i386 comparator callback cannot be forwarded
             // to the host CF (the callback is emulated x86 code, not native arm64).

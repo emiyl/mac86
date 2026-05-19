@@ -10,6 +10,7 @@ pub struct CFRange {
 pub type CFArrayRef = *const c_void;
 pub type CFMutableArrayRef = *mut c_void;
 pub type CFAllocatorRef = *const c_void;
+pub type CFNumberRef = *const c_void;
 
 #[repr(C)]
 pub struct CFArrayCallBacks {
@@ -40,4 +41,7 @@ unsafe extern "C" {
     pub fn CFArrayInsertValueAtIndex(array: CFMutableArrayRef, index: isize, value: *const c_void);
     pub fn CFArrayRemoveAllValues(array: CFMutableArrayRef);
     pub fn CFArrayRemoveValueAtIndex(array: CFMutableArrayRef, index: isize);
+    pub fn CFNumberCreate(allocator: CFAllocatorRef, theType: isize, valuePtr: *const c_void) -> CFNumberRef;
+    pub fn CFNumberGetTypeID() -> u64;
+    pub fn CFNumberGetValue(number: CFNumberRef, theType: isize, valuePtr: *mut c_void) -> bool;
 }
