@@ -7,7 +7,7 @@ fn run_cf_test_binary() {
     let bin = env::var("CARGO_BIN_EXE_mac86").expect("CARGO_BIN_EXE_mac86 not set");
 
     // The test program to run (already included in the repository)
-    let test_prog = "root/compile/cf_test";
+    let test_prog = "tests/cf_integration/cf_test_i386";
 
     let output = Command::new(&bin)
         .arg(test_prog)
