@@ -15,8 +15,9 @@ pub(super) fn read_f32(emu: &Unicorn<'_, ()>, addr: u32) -> f32 {
 /// Write an f64 result to ST(0) using the 80-bit x87 extended-precision format.
 pub(super) fn write_f64_st0(emu: &mut Unicorn<'_, ()>, value: f64) {
     let bytes = f64_to_x87(value);
-    let low8 = u64::from_le_bytes(bytes[0..8].try_into().unwrap_or_default());
-    let _ = emu.reg_write(RegisterX86::ST0, low8);
+    // reg_write only provides 8 bytes; Unicorn reads 10 for ST0 (floatx80).
+    // reg_write_long passes the full slice so the exponent field is correct.
+    let _ = emu.reg_write_long(RegisterX86::ST0, &bytes);
 }
 
 /// Convert IEEE 754 double to 80-bit x87 extended-precision (10 bytes, little-endian).
