@@ -34,7 +34,6 @@ int main(void) {
     /* 1. CFAbsoluteTimeGetCurrent ---------------------------------------- */
     printf("CFAbsoluteTimeGetCurrent\n");
     CFAbsoluteTime t = CFAbsoluteTimeGetCurrent();
-    printf("  time = %f\n", t);
     CHECK(t > 0.0);
 
     /* 2. CFArrayCreateMutable / AppendValue / GetCount / GetValueAtIndex --- */
