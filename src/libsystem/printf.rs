@@ -50,10 +50,10 @@ fn next32(emu: &Unicorn<'_, ()>, esp: &mut u32) -> u32 {
 }
 
 fn next64(emu: &Unicorn<'_, ()>, esp: &mut u32) -> u64 {
-    // i386 cdecl pushes the low word first, so it lands at the higher address.
-    // The high word is pushed last and sits at the lower address ([esp]).
-    let hi = read_u32(emu, *esp) as u64;
-    let lo = read_u32(emu, *esp + 4) as u64;
+    // i386 cdecl pushes the high word first, so it lands at the higher address.
+    // The low word is pushed last and sits at the lower address ([esp]).
+    let lo = read_u32(emu, *esp) as u64;
+    let hi = read_u32(emu, *esp + 4) as u64;
     *esp += 8;
     (hi << 32) | lo
 }
